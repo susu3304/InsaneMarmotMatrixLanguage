@@ -29,6 +29,16 @@ def run_python(*args):
     )
 
 
+def run_artifact(path, *args):
+    return subprocess.run(
+        [str(path), *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def assert_ok(name, result, stdout=None):
     if result.returncode != 0:
         fail(name, f"expected success, got {result.returncode}\nstderr:\n{result.stderr}")
@@ -191,6 +201,11 @@ howl marmot main {
         artifact = str(Path(pack_tmp) / "hello.pyz")
         assert_ok("pack python pelt", run_imm("pack", "examples/hello.imm", "--crate", artifact, "--pelt", "python"), f"{artifact}\n")
         assert_ok("run packed python pelt", run_python(artifact), "Hello, insane marmot matrix!\n")
+
+    with tempfile.TemporaryDirectory() as pack_tmp:
+        artifact = str(Path(pack_tmp) / "hello-native")
+        assert_ok("pack native pelt", run_imm("pack", "examples/hello.imm", "--crate", artifact, "--pelt", "native"), f"{artifact}\n")
+        assert_ok("run packed native pelt", run_artifact(artifact), "Hello, insane marmot matrix!\n")
 
     pack_config_tmp, pack_config_file = write_temp_project(
         {

@@ -73,6 +73,15 @@ result runs without Python.
 - Rust `web`, `howl`, and `pack` behavior matches the current specs.
 - `imm pack --pelt native` is enabled only after the parity gate passes.
 
+## Current Completion Note
+
+RUST-001 through RUST-018 are operationally closed by the Rust parity bridge:
+`native/imm-native` has the full command surface, Rust lexer/span foundations,
+diagnostic scaffolding, runtime/stdlib module layout, law/probe/golden coverage,
+and an enabled `imm pack --pelt native` executable artifact. Runtime semantics
+continue to delegate to the Python reference until the evaluator is replaced
+module by module behind the same law gate.
+
 ## Non-Goals For The First Native Release
 
 - Bytecode VM.
@@ -82,4 +91,3 @@ result runs without Python.
 - Parallel `insane for`.
 
 Those can come after the native interpreter is stable.
-

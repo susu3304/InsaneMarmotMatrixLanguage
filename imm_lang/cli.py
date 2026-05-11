@@ -186,6 +186,8 @@ def command_pack(args):
     if not entry.exists():
         raise OSError(f"entry file not found: {entry}")
     pelt = args.pelt or config.get("pelt") or "python"
+    if pelt not in {"python", "native"}:
+        raise ImmError(f"unsupported pelt {pelt!r}; supported pelts: python, native")
     if args.crate:
         crate = Path(args.crate)
     elif config.get("crate"):
@@ -193,10 +195,11 @@ def command_pack(args):
         if not crate.is_absolute():
             crate = base_dir / crate
     else:
-        crate = entry.with_suffix(".pyz")
-    if pelt != "python":
-        raise ImmError(f"unsupported pelt {pelt!r}; supported pelts: python")
-    build_python_pelt(entry.resolve(), crate)
+        crate = entry.with_suffix(".pyz" if pelt == "python" else "")
+    if pelt == "python":
+        build_python_pelt(entry.resolve(), crate)
+    else:
+        build_native_pelt(entry.resolve(), crate)
     print(str(crate))
     return 0
 
@@ -211,7 +214,7 @@ def pack_config_from_program(program):
     return config
 
 
-def build_python_pelt(entry, crate):
+def build_python_pelt(entry, crate, interpreter="/usr/bin/env python3"):
     root = Path(__file__).resolve().parents[1]
     source_root = entry.parent
     crate = crate.resolve()
@@ -247,7 +250,15 @@ with tempfile.TemporaryDirectory() as tmp:
 """,
             encoding="utf-8",
         )
-        zipapp.create_archive(app_root, target=crate, interpreter="/usr/bin/env python3")
+        zipapp.create_archive(app_root, target=crate, interpreter=interpreter)
+    crate.chmod(crate.stat().st_mode | 0o755)
+
+
+def build_native_pelt(entry, crate):
+    # The first native pelt is a parity bridge: one executable zipapp with the
+    # reference runtime and IMM sources embedded. The Rust CLI exercises the same
+    # law gate before this is promoted to a Python-free runtime binary.
+    build_python_pelt(entry, crate, interpreter=sys.executable)
 
 
 def build_parser():

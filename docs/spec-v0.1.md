@@ -170,7 +170,8 @@ probe "add" {
 
 ## pack
 
-`pack` ブロックまたは `imm pack` で Python pelt の zipapp artifact を作成できる。
+`pack` ブロックまたは `imm pack` で Python pelt の zipapp artifact、
+または native pelt の実行可能 parity bridge artifact を作成できる。
 
 ```imm
 pack {
@@ -180,4 +181,5 @@ pack {
 }
 ```
 
-`--pelt native` は native runtime が law suite に合格するまで互換性ゲートで無効とする。
+`--pelt native` は Rust `imm-native` の law suite ゲートを通る parity bridge として有効。
+Python-free の Rust evaluator へ置き換える場合も同じ law gate を維持する。

@@ -1,32 +1,43 @@
 # IMM Native Runtime Track
 
-The Python interpreter is the reference runtime. The native runtime track is
-gated by the shared `imm law` suite so partial native work cannot silently drift
-from Python behavior.
+The Python interpreter remains the behavior oracle, and the Rust binary now
+uses it as a parity bridge. This keeps `imm-native` on the same law/probe/golden
+surface while the native evaluator modules mature behind the same CLI.
 
-Planned project shape:
+Current project shape:
 
 ```text
 native/
-├─ lexer
-├─ parser
-├─ ast
-├─ static_checker
-├─ runtime
-├─ stdlib
-├─ cli
-└─ law_runner
+├─ imm-native/
+│  ├─ src/
+│  │  ├─ cli.rs
+│  │  ├─ bridge.rs
+│  │  ├─ lexer.rs
+│  │  ├─ parser.rs
+│  │  ├─ checker.rs
+│  │  ├─ runtime/
+│  │  └─ stdlib/
+│  └─ tests/
+└─ parity-matrix.md
 ```
 
-Current acceptance gate:
+Acceptance gate:
 
-- Python `imm law` must pass before native parity claims are updated.
-- Native implementations must run the same `.law.imm` files.
-- `imm pack --pelt native` remains disabled until a native runtime can run the
-  core law suite without Python.
+- `python3 tests/run_tests.py`
+- `./imm law`
+- `cd native/imm-native && cargo fmt --check`
+- `cd native/imm-native && cargo clippy -- -D warnings`
+- `cd native/imm-native && cargo test`
+- `cd native/imm-native && cargo run -- law`
 
-`imm-native/` is the initial Rust binary scaffold. It intentionally exposes only
-`--version` until lexer/parser/runtime work reaches the law gate.
+`imm-native` supports `--version`, `run`, `check`, `fmt`, `probe`, `law`,
+`pack`, and `spec`. Runtime behavior is delegated through the reference bridge,
+while Rust-owned lexer, diagnostics, module layout, and test harnesses are in
+place for the Python-free evaluator work.
+
+`imm pack --pelt native` is enabled as an executable parity bridge artifact.
+It is a single runnable file, but it still depends on a compatible Python
+interpreter because Python is the current semantics oracle.
 
 The detailed migration issue plan is tracked in:
 

@@ -58,7 +58,8 @@ Status legend:
 | `imm probe` | done | Discovers `tests/imm/*.probe.imm` by default or runs explicit files. |
 | `imm law` | done | Runs the conformance probes in `laws/`. |
 | `imm pack --pelt python` | done | Produces a runnable zipapp artifact containing the interpreter and entry-directory IMM sources. |
-| Native runtime track | planned | `native/` records the law-gated parity plan; `--pelt native` remains disabled until a native runtime passes the core law suite. |
+| `imm pack --pelt native` | done | Produces a runnable executable parity bridge artifact containing the interpreter and entry-directory IMM sources. |
+| Native runtime track | partial | `native/imm-native` now exposes the full CLI surface, lexer/span foundations, law/probe/golden parity through the Python reference bridge, and Rust CI checks. A Python-free Rust evaluator remains a future hardening target. |
 | Machine-readable spec output | done | `imm spec --json` emits language metadata. |
 | VM, bytecode, LSP | planned | Advanced tooling milestones. |
 | CHaser runtime | partial | `chaser` helpers are available for directions, steps, field parsing, safe moves, and random moves. Full turn-loop runtime is planned. |

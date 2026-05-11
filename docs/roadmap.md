@@ -168,6 +168,13 @@ The next slice should focus on static analysis:
 4. Add tests that prove `check` does not execute `marmot main` and that module cycles fail cleanly.
 5. Start the source-span work needed for full diagnostics.
 
+The Rust migration slice completed the operational RUST-001 through RUST-018
+gate as a parity bridge: `imm-native` has the full CLI surface, Rust lexer/span
+foundations, cargo fmt/clippy/test coverage, shared law execution, and an
+enabled `imm pack --pelt native` executable artifact. The next native slice is
+to replace bridge-backed runtime behavior with a Python-free Rust evaluator
+module by module while keeping the same law gate green.
+
 ## No More Placeholder Policy
 
 Any feature marked `partial` must now move through this lifecycle:
