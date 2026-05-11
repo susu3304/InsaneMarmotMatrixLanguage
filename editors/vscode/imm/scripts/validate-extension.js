@@ -44,4 +44,35 @@ if (nativeDiagnostics.length !== 1) {
   throw new Error("expected one native diagnostic");
 }
 
+const semantic = extension.classifySemanticTokens(`
+insane marmot main {
+    let a = 10
+    squeak add("insane", a)
+}
+
+dig add(a: Int, b: Int) -> Int {
+    return a + b
+}
+`);
+
+function hasToken(value, type) {
+  return semantic.some((token) => token.value === value && token.type === type);
+}
+
+if (!hasToken("add", "function")) {
+  throw new Error("expected add to receive function semantic color");
+}
+if (!hasToken("main", "function")) {
+  throw new Error("expected main to receive entrypoint function semantic color");
+}
+if (!hasToken("Int", "type")) {
+  throw new Error("expected Int to receive type semantic color");
+}
+if (!hasToken("a", "variable")) {
+  throw new Error("expected a to receive variable semantic color");
+}
+if (!hasToken("squeak", "function")) {
+  throw new Error("expected squeak to receive builtin function semantic color");
+}
+
 console.log("extension metadata ok");

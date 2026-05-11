@@ -43,6 +43,11 @@
         "path": "./syntaxes/imm.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[imm]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    },
     "snippets": [
       {
         "language": "imm",

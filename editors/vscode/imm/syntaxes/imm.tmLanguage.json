@@ -31,6 +31,18 @@
       "include": "#builtins"
     },
     {
+      "include": "#members"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#parameters"
+    },
+    {
+      "include": "#variables"
+    },
+    {
       "include": "#operators"
     }
   ],
@@ -187,6 +199,56 @@
         {
           "name": "support.module.imm",
           "match": "\\b(?:core|math|path|chaser|store|web|tick)\\b"
+        }
+      ]
+    },
+    "members": {
+      "patterns": [
+        {
+          "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.imm"
+            },
+            "2": {
+              "name": "entity.name.function.member.imm"
+            }
+          }
+        },
+        {
+          "match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.imm"
+            },
+            "2": {
+              "name": "variable.other.property.imm"
+            }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.imm",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "parameters": {
+      "patterns": [
+        {
+          "name": "variable.parameter.imm",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.readwrite.imm",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
         }
       ]
     },
