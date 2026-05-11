@@ -1,5 +1,7 @@
 # RUST-004 - AST And Parser Parity
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Implement the Rust AST and parser for the full current IMM grammar.
@@ -76,4 +78,3 @@ Implement the Rust AST and parser for the full current IMM grammar.
 
 - Parser drift is the biggest early migration risk. Keep Python and Rust grammar
   examples side by side until the law suite is broad enough.
-

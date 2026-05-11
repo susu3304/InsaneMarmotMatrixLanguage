@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as JsonValue};
 
@@ -2561,22 +2561,8 @@ impl Runtime {
     }
 
     fn web_grab(&self, options: &Value) -> Result<Value, Diagnostic> {
-        let url = match options {
-            Value::String(url) => url.clone(),
-            Value::Map(map) => {
-                let map = map.borrow();
-                match map.get("url") {
-                    Some(Value::String(url)) => url.clone(),
-                    _ => return Err(runtime_error("web request url must be String")),
-                }
-            }
-            _ => {
-                return Err(runtime_error(
-                    "web request expects String URL or Map options",
-                ))
-            }
-        };
-        if let Some(payload) = url.strip_prefix("data:") {
+        let request = WebRequestOptions::from_value(options)?;
+        if let Some(payload) = request.url.strip_prefix("data:") {
             let (_, body) = payload.split_once(',').unwrap_or(("", payload));
             let body = percent_decode(body)?;
             let headers = BTreeMap::new();
@@ -2584,14 +2570,55 @@ impl Runtime {
                 status: 200,
                 headers,
                 body,
-                url,
+                url: request.url,
                 ok: true,
             })));
         }
-        Err(Diagnostic::new(
-            Category::Network,
-            "network request failed: only data: URLs are supported natively",
-        ))
+
+        let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|err| {
+            Diagnostic::new(Category::Network, format!("invalid HTTP method: {err}"))
+        })?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(request.timeout_ms as u64))
+            .build()
+            .map_err(|err| {
+                Diagnostic::new(Category::Network, format!("network client failed: {err}"))
+            })?;
+        let mut builder = client.request(method, &request.url);
+        for (key, value) in request.headers {
+            builder = builder.header(key, value);
+        }
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+        let response = builder.send().map_err(|err| {
+            Diagnostic::new(Category::Network, format!("network request failed: {err}"))
+        })?;
+        let status = response.status().as_u16() as i64;
+        let url = response.url().to_string();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str().to_string(),
+                    Value::String(value.to_str().unwrap_or_default().to_string()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let body = response.text().map_err(|err| {
+            Diagnostic::new(
+                Category::Network,
+                format!("network response read failed: {err}"),
+            )
+        })?;
+        Ok(Value::Response(Rc::new(Response {
+            status,
+            headers,
+            body,
+            url,
+            ok: (200..400).contains(&status),
+        })))
     }
 
     fn check_type(
@@ -3803,6 +3830,85 @@ struct StaticEnv {
 struct StaticBinding {
     type_name: Option<String>,
     is_const: bool,
+}
+
+struct WebRequestOptions {
+    method: String,
+    url: String,
+    headers: BTreeMap<String, String>,
+    body: Option<String>,
+    timeout_ms: i64,
+}
+
+impl WebRequestOptions {
+    fn from_value(value: &Value) -> Result<Self, Diagnostic> {
+        let mut options = match value {
+            Value::String(url) => Self {
+                method: "GET".to_string(),
+                url: url.clone(),
+                headers: BTreeMap::new(),
+                body: None,
+                timeout_ms: 10_000,
+            },
+            Value::Map(map) => {
+                let map = map.borrow();
+                let method = match map.get("method") {
+                    Some(Value::String(method)) => method.clone(),
+                    Some(_) => return Err(runtime_error("web request method must be String")),
+                    None => "GET".to_string(),
+                };
+                let url = match map.get("url") {
+                    Some(Value::String(url)) if !url.is_empty() => url.clone(),
+                    _ => return Err(runtime_error("web request url must be String")),
+                };
+                let headers = match map.get("headers") {
+                    Some(Value::Map(headers)) => {
+                        let mut result = BTreeMap::new();
+                        for (key, value) in headers.borrow().iter() {
+                            let Value::String(value) = value else {
+                                return Err(runtime_error(
+                                    "web request headers must be Map<String, String>",
+                                ));
+                            };
+                            result.insert(key.clone(), value.clone());
+                        }
+                        result
+                    }
+                    Some(Value::Null) | None => BTreeMap::new(),
+                    Some(_) => return Err(runtime_error("web request headers must be Map")),
+                };
+                let body = match map.get("body") {
+                    Some(Value::String(body)) => Some(body.clone()),
+                    Some(Value::Null) | None => None,
+                    Some(_) => {
+                        return Err(runtime_error("web request body must be String or Null"))
+                    }
+                };
+                let timeout_ms = match map.get("timeout_ms") {
+                    Some(Value::Int(timeout_ms)) => *timeout_ms,
+                    Some(_) => return Err(runtime_error("web request timeout_ms must be Int")),
+                    None => 10_000,
+                };
+                Self {
+                    method,
+                    url,
+                    headers,
+                    body,
+                    timeout_ms,
+                }
+            }
+            _ => {
+                return Err(runtime_error(
+                    "web request expects String URL or Map options",
+                ))
+            }
+        };
+        options.method = options.method.to_uppercase();
+        if options.timeout_ms <= 0 {
+            return Err(runtime_error("web request timeout_ms must be > 0"));
+        }
+        Ok(options)
+    }
 }
 
 impl StaticEnv {

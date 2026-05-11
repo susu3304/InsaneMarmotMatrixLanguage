@@ -1,5 +1,7 @@
 # RUST-007 - Runtime Values And Environments
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Implement the native value model and lexical environment foundation.
@@ -78,4 +80,3 @@ Panic(message)
 
 - Rust ownership around closures and mutable environments can get tricky. Prefer
   `Rc<RefCell<...>>` or an arena design early; optimize later.
-

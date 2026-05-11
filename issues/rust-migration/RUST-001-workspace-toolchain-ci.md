@@ -1,5 +1,7 @@
 # RUST-001 - Workspace, Toolchain, And CI Baseline
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Turn `native/imm-native` from a preview scaffold into a maintainable Rust project
@@ -94,4 +96,3 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 
 Keep `Cargo.lock` committed once real dependencies are added. For application
 binaries, a committed lockfile makes native builds reproducible.
-

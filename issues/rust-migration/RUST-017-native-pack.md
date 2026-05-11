@@ -1,5 +1,7 @@
 # RUST-017 - Native Pack
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Enable `imm pack --pelt native` and produce a single executable that runs an IMM
@@ -96,4 +98,3 @@ Use Option A first. Move to Option B after native runtime stabilizes.
 
 - Cross-compilation is out of scope for the first release. Build for host
   platform first.
-

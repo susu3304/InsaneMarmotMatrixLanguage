@@ -1,5 +1,7 @@
 # RUST-008 - Expressions And Control Flow
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Implement native evaluation for expressions and statement-level control flow.
@@ -58,4 +60,3 @@ matching the current Python behavior.
 ## Notes
 
 This issue can land before functions/modules. Keep test programs self-contained.
-

@@ -1,5 +1,7 @@
 # RUST-010 - Static Checker And Type Model
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port the current static checker behavior into Rust and make it a stable gate for
@@ -55,4 +57,3 @@ Port the current static checker behavior into Rust and make it a stable gate for
 
 Do not aim for a perfect static type system in the first native release. Match
 the current Python checker first.
-

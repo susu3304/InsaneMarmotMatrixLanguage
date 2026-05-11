@@ -1,5 +1,7 @@
 # RUST-006 - CLI Command Parity
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Give the Rust binary the same command surface as Python, even while individual
@@ -51,4 +53,3 @@ imm-native spec [--json]
 
 This issue is about command shape, not feature parity. Keep command stubs honest
 and explicit.
-

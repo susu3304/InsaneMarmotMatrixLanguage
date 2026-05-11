@@ -3,12 +3,12 @@
 | Area | Python Reference | Native Track |
 | --- | --- | --- |
 | Lexer/parser | done | native Rust |
-| Static checker | partial | native Rust broad semantic checks |
+| Static checker | done | native Rust semantic checks for current language surface |
 | Core runtime | done | native Rust |
 | Matrix/Point | done | native Rust |
-| Objects/masks/store | partial | native Rust, JSON store compatible |
-| `web`/`tick` | done | native Rust deterministic `data:` URL support and tick |
-| `howl`/`wait`/`scatter`/`nest`/`nap` | done | native Rust synchronous task evaluator |
+| Objects/masks/store | done | native Rust, JSON store compatible |
+| `web`/`tick` | done | native Rust `data:` URL and HTTP support plus tick |
+| `howl`/`wait`/`scatter`/`nest`/`nap` | done | native Rust task evaluator |
 | `probe`/`law` | done | native Rust shared law runner |
 | `pack --pelt python` | done | n/a |
 | `pack --pelt native` | done | Python-free Rust executable |

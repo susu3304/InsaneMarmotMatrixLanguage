@@ -1,5 +1,7 @@
 # RUST-013 - Store Compatibility
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port the built-in `.immstore` persistence layer to Rust while preserving file
@@ -51,4 +53,3 @@ be readable by Python.
 
 - JSON type tags must stay stable. Document any format extension before writing
   it.
-

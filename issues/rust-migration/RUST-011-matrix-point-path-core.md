@@ -1,5 +1,7 @@
 # RUST-011 - Matrix, Point, Path, And Core Stdlib
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port the matrix-centered language core and standard library to Rust.
@@ -67,4 +69,3 @@ Port the matrix-centered language core and standard library to Rust.
 ## Risks
 
 - Formatting values must match Python reference closely enough for golden tests.
-

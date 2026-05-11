@@ -43,8 +43,8 @@ Status legend:
 | `math` library | done | Required math functions are available. |
 | `path` library | done | Basic BFS and A* are available. |
 | `store` library | partial | Built-in JSON-backed object persistence supports open/save/load/all/find/get/delete/count/clear for `den` objects. Transactions, indexes, and concurrent writers are planned. |
-| `web` library | done | `web.grab` and `web.fetch` use the Python standard library, return `Response`, expose fields/methods, and keep HTTP error statuses as values. |
-| `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run on an isolated asyncio-backed task layer. |
+| `web` library | done | Python and Rust support `web.grab` / `web.fetch`, `data:` URLs, HTTP method/header/body/timeout options, `Response` fields/methods, JSON/text helpers, and HTTP error statuses as values. |
+| `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run through the task runtime. |
 | `tick` library | done | `tick.now()` returns UNIX milliseconds. |
 | `probe` / `expect` | done | Probe blocks parse, check, and run through `imm probe`; failed expects report the file and probe name. |
 | `law` suite | done | `imm law` runs shared `.law.imm` probe files under `laws/`. |
@@ -59,7 +59,7 @@ Status legend:
 | `imm law` | done | Runs the conformance probes in `laws/`. |
 | `imm pack --pelt python` | done | Produces a runnable zipapp artifact containing the interpreter and entry-directory IMM sources. |
 | `imm pack --pelt native` | done | Produces a runnable Python-free Rust executable containing the native evaluator and entry-directory IMM sources. |
-| Native runtime track | done | `native/imm-native` exposes the full CLI surface, parses and evaluates IMM directly in Rust, runs the shared law/probe/golden surface, and passes Rust CI checks. |
+| Native runtime track | done | `native/imm-native` exposes the full CLI surface, parses and evaluates IMM directly in Rust, runs the shared law/probe/golden surface, supports native HTTP, and passes Rust CI checks. |
 | Machine-readable spec output | done | `imm spec --json` emits language metadata. |
 | VM, bytecode, LSP | planned | Advanced tooling milestones. |
 | CHaser runtime | partial | `chaser` helpers are available for directions, steps, field parsing, safe moves, and random moves. Full turn-loop runtime is planned. |

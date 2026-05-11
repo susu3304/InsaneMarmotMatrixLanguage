@@ -1,5 +1,7 @@
 # RUST-014 - Web And Tick Stdlib
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port `web` and `tick` to Rust with behavior matching the Python reference.
@@ -68,4 +70,3 @@ web.fetch(options: Map) -> Task<Response>
 
 - `reqwest` does not handle `data:` URLs like Python `urllib` does. Add explicit
   `data:` handling in IMM stdlib to preserve deterministic tests.
-

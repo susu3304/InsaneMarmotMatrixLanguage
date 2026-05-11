@@ -1,5 +1,7 @@
 # RUST-005 - Diagnostics And Error Categories
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Define and implement native diagnostic infrastructure before runtime behavior
@@ -66,4 +68,3 @@ Later display can add source snippets.
 
 Do not over-invest in pretty snippets before runtime parity. Precise spans and
 stable categories matter more.
-

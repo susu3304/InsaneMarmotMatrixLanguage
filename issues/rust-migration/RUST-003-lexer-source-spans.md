@@ -1,5 +1,7 @@
 # RUST-003 - Lexer With Source Spans
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Implement the Rust lexer/tokenizer with source spans and keyword parity with the
@@ -68,4 +70,3 @@ Line and column are for display. Byte offsets are for robust slicing.
 
 Do not use regex-only lexing for everything. IMM has block comments, strings,
 and source spans; a small hand-written scanner is easier to control.
-

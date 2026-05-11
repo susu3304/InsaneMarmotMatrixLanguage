@@ -1,5 +1,7 @@
 # RUST-002 - Native Law Harness
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Create the native-side harness that compares Rust behavior with the Python
@@ -57,4 +59,3 @@ discover files and enumerate planned tests.
 - Law files may rely on features not yet native. Mark unsupported features as
   pending instead of silently skipping.
 - Avoid baking absolute developer paths into tests.
-

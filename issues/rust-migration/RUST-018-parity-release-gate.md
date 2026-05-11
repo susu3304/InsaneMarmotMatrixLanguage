@@ -1,5 +1,7 @@
 # RUST-018 - Parity Release Gate
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Define the final gate for declaring the Rust runtime ready and enabling native
@@ -67,4 +69,3 @@ Plus native pack smoke tests once RUST-017 lands.
 
 This is the point where Rust becomes either the default runtime or an officially
 supported alternative. Do not cross this gate on partial behavior.
-

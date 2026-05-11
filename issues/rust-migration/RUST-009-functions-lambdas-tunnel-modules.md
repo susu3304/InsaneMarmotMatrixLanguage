@@ -1,5 +1,7 @@
 # RUST-009 - Functions, Lambdas, Tunnel, And Modules
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Implement native user functions, lambdas, pipeline processing, and module import.
@@ -51,4 +53,3 @@ Implement native user functions, lambdas, pipeline processing, and module import
 
 - Captured environments are central to objects, howl functions, and lambdas. Keep
   closure representation shared and well-tested.
-

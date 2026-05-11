@@ -172,8 +172,7 @@ The Rust migration slice completed the operational RUST-001 through RUST-018
 gate: `imm-native` has the full CLI surface, Rust lexer/parser/evaluator
 coverage, cargo fmt/clippy/test coverage, shared law execution, and an enabled
 Python-free `imm pack --pelt native` executable artifact. The next native slice
-should harden diagnostics, broaden HTTP beyond deterministic `data:` URLs, and
-grow law coverage for every runtime surface.
+should harden diagnostics and grow law coverage for every runtime surface.
 
 ## No More Placeholder Policy
 

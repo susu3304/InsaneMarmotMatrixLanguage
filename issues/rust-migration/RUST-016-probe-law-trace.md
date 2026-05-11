@@ -1,5 +1,7 @@
 # RUST-016 - Probe, Law, And Trace
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port IMM test and debug facilities to Rust.
@@ -51,4 +53,3 @@ Port IMM test and debug facilities to Rust.
 ## Notes
 
 This issue is the main acceptance path for every previous runtime issue.
-

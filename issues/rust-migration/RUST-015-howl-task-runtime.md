@@ -1,5 +1,7 @@
 # RUST-015 - Howl Task Runtime
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port IMM asynchronous semantics to Rust.
@@ -68,4 +70,3 @@ web.fetch -> async HTTP task
 
 - Captured environments across tasks must be safe. Start with single-threaded
   runtime if needed, then widen to multi-threaded once values are Send-safe.
-

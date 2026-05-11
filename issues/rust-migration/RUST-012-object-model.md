@@ -1,5 +1,7 @@
 # RUST-012 - Object Model
 
+Status: Done. Operationally closed by the Python-free Rust evaluator and verified by the native parity gate.
+
 ## Goal
 
 Port IMM object-oriented features to Rust.
@@ -55,4 +57,3 @@ Port IMM object-oriented features to Rust.
 
 - Object storage and method closures interact with modules and store. Keep object
   metadata stable and serializable.
-
