@@ -10,6 +10,9 @@
 ./imm --version
 ./imm check examples/hello.imm
 ./imm run examples/hello.imm
+./imm probe
+./imm law
+./imm pack examples/hello.imm --crate dist/hello.pyz --pelt python
 ```
 
 出力例:
@@ -40,6 +43,12 @@ Hello, insane marmot matrix!
 - 単一継承 `under` と `under.init(...)` / `under.method(...)`
 - `use math` / `use path`
 - 同じディレクトリの `foo.imm` を `use foo` で読み込む簡易モジュール
+- `use web` による `web.grab` / `web.fetch`
+- `howl` / `wait` / `scatter` / `nest`
+- `nap` / `tick.now()`
+- `probe` / `expect` / `imm law`
+- `trace` と `imm run --trace`
+- `imm pack --pelt python` による zipapp パッケージ
 
 ## 例
 
@@ -72,9 +81,13 @@ marmot main {
 
 ```bash
 ./imm run main.imm
+./imm run main.imm --trace
 ./imm check main.imm
 ./imm fmt main.imm
 ./imm fmt --check main.imm
+./imm probe [file.imm]
+./imm law
+./imm pack main.imm --crate dist/app.pyz --pelt python
 ./imm spec --json
 ./imm --version
 ```
@@ -86,6 +99,8 @@ marmot main {
 `chaser` ライブラリには `direction`、`step`、`parse_field`、`safe_moves`、`random_move` が入っています。
 
 `store` ライブラリには、外部DBなしで `den` オブジェクトを永続化する `open`、`save`、`load`、`all`、`find`、`get`、`delete`、`count`、`clear` が入っています。保存ファイルの拡張子は慣例として `.immstore` です。
+
+`web` ライブラリには同期 `grab` と howl 向けの `fetch` が入っています。`howl` タスク、`probe`/`law`、`trace`、`pack` の詳細は `docs/web-spec.md`、`docs/howl-spec.md`、`docs/pack-spec.md` を参照してください。
 
 ## 開発
 

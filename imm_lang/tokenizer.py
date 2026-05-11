@@ -39,6 +39,22 @@ KEYWORDS = {
     "mask",
     "wear",
     "under",
+    "web",
+    "fetch",
+    "grab",
+    "howl",
+    "wait",
+    "scatter",
+    "nest",
+    "nap",
+    "tick",
+    "pack",
+    "crate",
+    "pelt",
+    "probe",
+    "law",
+    "expect",
+    "trace",
 }
 
 

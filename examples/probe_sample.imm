@@ -1,0 +1,7 @@
+dig add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+probe "add" {
+    expect add(1, 1) == 2
+}

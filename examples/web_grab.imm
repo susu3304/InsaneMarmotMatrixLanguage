@@ -1,0 +1,7 @@
+use web
+
+marmot main {
+    let res = web.grab("data:application/json,%7B%22name%22%3A%22marmot%22%7D")
+    squeak res.status
+    squeak res.json()["name"]
+}

@@ -1,0 +1,4 @@
+probe "core arithmetic and arrays" {
+    expect 1 + 1 == 2
+    expect [1, 2, 3].len() == 3
+}

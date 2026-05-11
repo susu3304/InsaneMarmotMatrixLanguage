@@ -1,0 +1,8 @@
+howl dig double(x: Int) -> Int {
+    wait nap(1)
+    return x * 2
+}
+
+probe "howl syntax is checkable" {
+    expect true
+}
