@@ -113,4 +113,17 @@ marmot main {
 python3 tests/run_tests.py
 ```
 
+## VS Code
+
+VS Code 拡張機能は `editors/vscode/imm` にあります。
+
+```bash
+cd editors/vscode/imm
+npm test
+npm run package
+code --install-extension imm-vscode-0.1.0.vsix
+```
+
+`.imm` のシンタックスハイライト、スニペット、保存時 `imm check`、`imm fmt`、`IMM: Run File` / `IMM: Run Law Suite` などのコマンドを提供します。
+
 完全版までの道筋は `docs/roadmap.md`、仕様対応状況は `docs/compliance.md` にまとめています。

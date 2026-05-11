@@ -1,0 +1,150 @@
+{
+  "name": "imm-vscode",
+  "displayName": "insane marmot matrix",
+  "description": "VS Code language support for IMM (.imm) files.",
+  "version": "0.1.0",
+  "publisher": "imm",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:imm",
+    "onCommand:imm.checkFile",
+    "onCommand:imm.runFile",
+    "onCommand:imm.runFileWithTrace",
+    "onCommand:imm.formatFile",
+    "onCommand:imm.probe",
+    "onCommand:imm.law"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "imm",
+        "aliases": [
+          "IMM",
+          "insane marmot matrix"
+        ],
+        "extensions": [
+          ".imm"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "imm",
+        "scopeName": "source.imm",
+        "path": "./syntaxes/imm.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "imm",
+        "path": "./snippets/imm.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "imm.checkFile",
+        "title": "IMM: Check File",
+        "category": "IMM"
+      },
+      {
+        "command": "imm.runFile",
+        "title": "IMM: Run File",
+        "category": "IMM"
+      },
+      {
+        "command": "imm.runFileWithTrace",
+        "title": "IMM: Run File With Trace",
+        "category": "IMM"
+      },
+      {
+        "command": "imm.formatFile",
+        "title": "IMM: Format File",
+        "category": "IMM"
+      },
+      {
+        "command": "imm.probe",
+        "title": "IMM: Run Probe",
+        "category": "IMM"
+      },
+      {
+        "command": "imm.law",
+        "title": "IMM: Run Law Suite",
+        "category": "IMM"
+      }
+    ],
+    "configuration": {
+      "title": "IMM",
+      "properties": {
+        "imm.commandPath": {
+          "type": "string",
+          "default": "./imm",
+          "description": "Path to the IMM CLI. Relative paths are resolved from the workspace root."
+        },
+        "imm.nativeCommandPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to imm-native. When empty and native mode is enabled, the extension tries native/imm-native/target/release/imm-native, then target/debug/imm-native."
+        },
+        "imm.useNative": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use imm-native instead of the Python reference CLI for commands."
+        },
+        "imm.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run imm check on saved .imm files and publish diagnostics."
+        },
+        "imm.runInTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run IMM commands in a VS Code terminal. When disabled, command output is written to the IMM output channel."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "imm.runFile",
+          "when": "resourceLangId == imm",
+          "group": "navigation"
+        },
+        {
+          "command": "imm.checkFile",
+          "when": "resourceLangId == imm",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "imm.runFile",
+          "when": "resourceLangId == imm",
+          "group": "imm"
+        },
+        {
+          "command": "imm.checkFile",
+          "when": "resourceLangId == imm",
+          "group": "imm"
+        },
+        {
+          "command": "imm.formatFile",
+          "when": "resourceLangId == imm",
+          "group": "imm"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node ./scripts/validate-extension.js",
+    "package": "npx --yes @vscode/vsce package --no-dependencies --allow-missing-repository"
+  }
+}

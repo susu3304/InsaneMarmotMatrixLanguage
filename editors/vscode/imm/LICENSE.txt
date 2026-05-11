@@ -1,0 +1,3 @@
+This VS Code extension package is prepared for private/internal use with the
+IMM repository. It is not licensed for public redistribution unless the
+repository owner adds an explicit distribution license.

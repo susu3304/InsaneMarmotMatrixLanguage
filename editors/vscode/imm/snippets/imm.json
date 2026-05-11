@@ -1,0 +1,95 @@
+{
+  "marmot main": {
+    "prefix": "marmot",
+    "body": [
+      "marmot main {",
+      "    ${1:squeak \"Hello, insane marmot matrix!\"}",
+      "}"
+    ],
+    "description": "Create a marmot main entrypoint."
+  },
+  "insane marmot main": {
+    "prefix": "insane-main",
+    "body": [
+      "insane marmot main {",
+      "    ${1}",
+      "}"
+    ],
+    "description": "Create an insane marmot main entrypoint."
+  },
+  "howl marmot main": {
+    "prefix": "howl-main",
+    "body": [
+      "howl marmot main {",
+      "    ${1}",
+      "}"
+    ],
+    "description": "Create a howl marmot main entrypoint."
+  },
+  "dig function": {
+    "prefix": "dig",
+    "body": [
+      "dig ${1:name}(${2}) -> ${3:Void} {",
+      "    ${4}",
+      "}"
+    ],
+    "description": "Create a function."
+  },
+  "probe block": {
+    "prefix": "probe",
+    "body": [
+      "probe \"${1:name}\" {",
+      "    expect ${2:true}",
+      "}"
+    ],
+    "description": "Create a probe test block."
+  },
+  "den": {
+    "prefix": "den",
+    "body": [
+      "den ${1:Name} {",
+      "    fur dig init(${2}) {",
+      "        ${3}",
+      "    }",
+      "}"
+    ],
+    "description": "Create a den object."
+  },
+  "mask": {
+    "prefix": "mask",
+    "body": [
+      "mask ${1:Name} {",
+      "    dig ${2:method}(${3}) -> ${4:Void}",
+      "}"
+    ],
+    "description": "Create a mask interface."
+  },
+  "for loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in ${2:0..10} {",
+      "    ${3}",
+      "}"
+    ],
+    "description": "Create a for-in loop."
+  },
+  "if block": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2}",
+      "}"
+    ],
+    "description": "Create an if block."
+  },
+  "matrix": {
+    "prefix": "matrix",
+    "body": [
+      "matrix [",
+      "    [${1:0}, ${2:1}],",
+      "    [${3:1}, ${4:0}]",
+      "]"
+    ],
+    "description": "Create a matrix literal."
+  }
+}
