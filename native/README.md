@@ -27,3 +27,9 @@ Current acceptance gate:
 
 `imm-native/` is the initial Rust binary scaffold. It intentionally exposes only
 `--version` until lexer/parser/runtime work reaches the law gate.
+
+The detailed migration issue plan is tracked in:
+
+```text
+issues/rust-migration/
+```

@@ -138,3 +138,13 @@ suite as the Python interpreter.
 - Feature parity matrix.
 - Native `imm` binary preview.
 
+## Detailed Issue Breakdown
+
+The full Rust migration issue set lives under:
+
+```text
+issues/rust-migration/
+```
+
+Start with `issues/rust-migration/README.md` and follow the RUST-001 through
+RUST-018 dependency order.

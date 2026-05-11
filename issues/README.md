@@ -37,6 +37,10 @@ The adopted vocabulary is intentionally IMM-flavored:
 8. [008 - Native Runtime Binary](008-native-runtime-binary.md)
 9. [009 - Release And Compatibility Gate](009-release-compatibility-gate.md)
 
+The Rust migration is further broken down in
+[`rust-migration/`](rust-migration/README.md), from workspace setup through
+native `pack`.
+
 ## Milestones
 
 ### Milestone A: Spec Lock
@@ -79,4 +83,3 @@ working experiments.
 - `trace` writes to stderr only when tracing is enabled.
 - `imm pack main.imm --pelt python` can produce a runnable artifact.
 - A native runtime path exists and is validated against the same law suite.
-
