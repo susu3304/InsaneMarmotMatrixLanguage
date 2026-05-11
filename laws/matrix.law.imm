@@ -1,0 +1,9 @@
+probe "matrix access" {
+    let field = matrix [
+        [1, 2],
+        [3, 4]
+    ]
+
+    expect field[0, 1] == 2
+    expect field[@point(1, 1)] == 4
+}

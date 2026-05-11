@@ -19,6 +19,16 @@ def run_imm(*args):
     )
 
 
+def run_python(*args):
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def assert_ok(name, result, stdout=None):
     if result.returncode != 0:
         fail(name, f"expected success, got {result.returncode}\nstderr:\n{result.stderr}")
@@ -66,6 +76,143 @@ def main():
     assert_ok("store example", run_imm("run", "examples/store.imm"), "susu: 80\n1\n")
     assert_ok("check", run_imm("check", "examples/chaser.imm"), "OK\n")
     assert_ok("spec json", run_imm("spec", "--json"))
+
+    howl_async = write_temp(
+        """howl dig load() -> String {
+    return "ok"
+}
+
+howl marmot main {
+    let task = scatter load()
+    squeak wait task
+}
+"""
+    )
+    assert_ok("check howl async", run_imm("check", howl_async), "OK\n")
+    assert_ok("run howl async", run_imm("run", howl_async), "ok\n")
+
+    bad_wait = write_temp(
+        """marmot main {
+    wait nap(10)
+}
+"""
+    )
+    assert_fail("check wait outside howl", run_imm("check", bad_wait), "wait can only be used inside howl context")
+
+    nest_nap = write_temp(
+        """howl dig work(x: Int) -> Int {
+    wait nap(1)
+    return x * 2
+}
+
+howl marmot main {
+    let group = nest {
+        scatter work(1)
+        scatter work(2)
+    }
+    squeak wait group
+    squeak tick.now() > 0
+}
+"""
+    )
+    assert_ok("nest nap tick", run_imm("run", nest_nap), "[2, 4]\ntrue\n")
+
+    web_grab = write_temp(
+        """use web
+
+marmot main {
+    let res = web.grab("data:application/json,%7B%22name%22%3A%22marmot%22%7D")
+    squeak res.status
+    squeak res.ok
+    squeak res.json()["name"]
+}
+"""
+    )
+    assert_ok("web grab response", run_imm("run", web_grab), "200\ntrue\nmarmot\n")
+
+    web_options = write_temp(
+        """use web
+
+marmot main {
+    let res = web.grab({
+        "url": "data:text/plain,option-ok",
+        "timeout_ms": 1000
+    })
+    squeak res.text()
+}
+"""
+    )
+    assert_ok("web grab options", run_imm("run", web_options), "option-ok\n")
+
+    web_fetch = write_temp(
+        """use web
+
+howl marmot main {
+    let res = wait web.fetch("data:text/plain,async-ok")
+    squeak res.status
+    squeak res.text()
+}
+"""
+    )
+    assert_ok("web fetch task", run_imm("run", web_fetch), "200\nasync-ok\n")
+
+    trace_file = write_temp(
+        """marmot main {
+    let x = 10
+    trace x
+    squeak x
+}
+"""
+    )
+    assert_ok("trace disabled stdout", run_imm("run", trace_file), "10\n")
+    traced = run_imm("run", trace_file, "--trace")
+    assert_ok("trace enabled stdout", traced, "10\n")
+    if "[trace] 10" not in traced.stderr:
+        fail("trace enabled stderr", f"missing trace output\nstderr:\n{traced.stderr}")
+
+    probe_file = write_temp(
+        """probe "add" {
+    expect 1 + 1 == 2
+}
+"""
+    )
+    assert_ok("probe pass", run_imm("probe", probe_file), f"PASS {probe_file}: add\nprobe: 1 passed, 0 failed\n")
+
+    failing_probe = write_temp(
+        """probe "fail" {
+    expect false
+}
+"""
+    )
+    assert_fail("probe fail", run_imm("probe", failing_probe), "FAIL")
+    assert_ok("law suite", run_imm("law"))
+
+    with tempfile.TemporaryDirectory() as pack_tmp:
+        artifact = str(Path(pack_tmp) / "hello.pyz")
+        assert_ok("pack python pelt", run_imm("pack", "examples/hello.imm", "--crate", artifact, "--pelt", "python"), f"{artifact}\n")
+        assert_ok("run packed python pelt", run_python(artifact), "Hello, insane marmot matrix!\n")
+
+    pack_config_tmp, pack_config_file = write_temp_project(
+        {
+            "pack.imm": """pack {
+    entry "main.imm"
+    crate "app.pyz"
+    pelt "python"
+}
+""",
+            "main.imm": """marmot main {
+    squeak "packed-config"
+}
+""",
+        },
+        main_name="pack.imm",
+    )
+    try:
+        artifact = str(Path(pack_config_file).with_name("app.pyz").resolve())
+        assert_ok("pack config", run_imm("pack", pack_config_file), f"{artifact}\n")
+        assert_ok("run pack config artifact", run_python(artifact), "packed-config\n")
+    finally:
+        pack_config_tmp.cleanup()
 
     bad_array = write_temp('let nums: Array<Int> = [1, "x"]\n')
     assert_fail("check generic array type", run_imm("check", bad_array), "nums[1] must be Int")

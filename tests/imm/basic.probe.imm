@@ -1,0 +1,3 @@
+probe "discovered probe" {
+    expect "marmot".len() == 6
+}

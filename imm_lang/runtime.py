@@ -1,7 +1,13 @@
+import asyncio
+import contextvars
 import heapq
 import json
 import math as py_math
 import random
+import sys
+import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,6 +173,83 @@ class BoundMethod:
         return f"<method {self.name}>"
 
 
+class Response:
+    def __init__(self, status, headers, body, url):
+        self.status = 200 if status is None else int(status)
+        self.headers = dict(headers)
+        self.body = body
+        self.url = url
+        self.ok = 200 <= self.status < 400
+
+    def text(self):
+        return self.body
+
+    def json(self):
+        try:
+            return json.loads(self.body)
+        except json.JSONDecodeError as err:
+            raise ImmRuntimeError(f"invalid JSON response: {err}") from err
+
+    def __str__(self):
+        return f"<Response {self.status} {self.url}>"
+
+
+class ImmTask:
+    def __init__(self, factory, name="<task>", scheduled=False):
+        self.factory = factory
+        self.name = name
+        self._task = None
+        self._done = False
+        self._result = None
+        if scheduled:
+            self.start()
+
+    def start(self):
+        if self._task is None and not self._done:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError as err:
+                raise ImmRuntimeError("scatter requires a running howl context") from err
+            self._task = loop.create_task(self.factory())
+        return self
+
+    async def wait(self):
+        if self._done:
+            return self._result
+        if self._task is not None:
+            result = await self._task
+        else:
+            result = await self.factory()
+        self._result = result
+        self._done = True
+        return result
+
+    def cancel(self):
+        if self._task is not None:
+            self._task.cancel()
+            return True
+        return False
+
+    def __str__(self):
+        return f"<task {self.name}>"
+
+
+class TaskGroup:
+    def __init__(self, tasks):
+        self.tasks = list(tasks)
+
+    async def wait(self):
+        try:
+            return [await task.wait() for task in self.tasks]
+        except Exception:
+            for task in self.tasks:
+                task.cancel()
+            raise
+
+    def __str__(self):
+        return f"<task-group {len(self.tasks)}>"
+
+
 class UserFunction:
     def __init__(self, name, params, return_type, body, closure):
         self.name = name
@@ -192,6 +275,31 @@ class UserFunction:
 
     def __str__(self):
         return f"<dig {self.name}>"
+
+
+class HowlFunction(UserFunction):
+    def call(self, runtime, args):
+        if len(args) != len(self.params):
+            raise ImmRuntimeError(f"{self.name} expects {len(self.params)} arguments, got {len(args)}")
+        for param, value in zip(self.params, args):
+            check_type(value, param.type_name, f"parameter {param.name}", runtime)
+
+        async def runner():
+            env = Environment(self.closure)
+            for param, value in zip(self.params, args):
+                env.define(param.name, value, type_name=param.type_name, type_context=runtime)
+            try:
+                await runtime.async_execute_block(self.body, env)
+            except ReturnSignal as signal:
+                check_type(signal.value, self.return_type, f"return value of {self.name}", runtime)
+                return signal.value
+            check_type(None, self.return_type, f"return value of {self.name}", runtime)
+            return None
+
+        return ImmTask(runner, name=self.name)
+
+    def __str__(self):
+        return f"<howl dig {self.name}>"
 
 
 class LambdaFunction:
@@ -460,13 +568,28 @@ class ContinueSignal(Exception):
 
 
 class Runtime:
-    def __init__(self, source_path=None, output=print, input_func=input, check_only=False, module_cache=None, module_stack=None):
+    def __init__(
+        self,
+        source_path=None,
+        output=print,
+        input_func=input,
+        check_only=False,
+        module_cache=None,
+        module_stack=None,
+        trace_enabled=False,
+        trace_output=None,
+    ):
         self.source_path = Path(source_path).resolve() if source_path else None
         self.output = output
         self.input_func = input_func
         self.check_only = check_only
         self.module_cache = module_cache if module_cache is not None else {}
         self.module_stack = module_stack if module_stack is not None else []
+        self.trace_enabled = trace_enabled
+        self.trace_output = trace_output if trace_output is not None else (lambda value: print(value, file=sys.stderr))
+        self._env_var = contextvars.ContextVar(f"imm_env_{id(self)}")
+        self._howl_depth_var = contextvars.ContextVar(f"imm_howl_depth_{id(self)}", default=0)
+        self._probe_stack_var = contextvars.ContextVar(f"imm_probe_stack_{id(self)}", default=())
         self.env = Environment()
         self.insane_depth = 0
         self.dens = {}
@@ -474,8 +597,33 @@ class Runtime:
         self.current_den = []
         self._install_core()
 
+    @property
+    def env(self):
+        return self._env_var.get()
+
+    @env.setter
+    def env(self, value):
+        self._env_var.set(value)
+
+    @property
+    def howl_depth(self):
+        return self._howl_depth_var.get()
+
+    @howl_depth.setter
+    def howl_depth(self, value):
+        self._howl_depth_var.set(value)
+
+    @property
+    def probe_stack(self):
+        return self._probe_stack_var.get()
+
+    @probe_stack.setter
+    def probe_stack(self, value):
+        self._probe_stack_var.set(tuple(value))
+
     def prepare(self, program):
         main_def = None
+        howl_main_def = None
         for item in program.items:
             if isinstance(item, n.UseStmt):
                 self.env.define(item.name, self._load_namespace(item.name), const=True)
@@ -489,9 +637,19 @@ class Runtime:
         for item in program.items:
             if isinstance(item, n.FunctionDef):
                 self.env.define(item.name, UserFunction(item.name, item.params, item.return_type, item.body, self.env), const=True)
+            elif isinstance(item, n.HowlFunctionDef):
+                self.env.define(item.name, HowlFunction(item.name, item.params, item.return_type, item.body, self.env), const=True)
             elif isinstance(item, n.MainDef):
+                if main_def is not None:
+                    raise ImmRuntimeError("duplicate marmot main")
                 main_def = item
-        return main_def
+            elif isinstance(item, n.HowlMainDef):
+                if howl_main_def is not None:
+                    raise ImmRuntimeError("duplicate howl marmot main")
+                howl_main_def = item
+        if main_def is not None and howl_main_def is not None:
+            raise ImmRuntimeError("cannot define both marmot main and howl marmot main")
+        return howl_main_def if howl_main_def is not None else main_def
 
     def check(self, program):
         self.prepare(program)
@@ -501,20 +659,336 @@ class Runtime:
         main_def = self.prepare(program)
 
         for item in program.items:
-            if isinstance(item, (n.FunctionDef, n.MainDef, n.UseStmt, n.ModuleDef, n.DenDef, n.MaskDef)):
+            if isinstance(
+                item,
+                (
+                    n.FunctionDef,
+                    n.HowlFunctionDef,
+                    n.MainDef,
+                    n.HowlMainDef,
+                    n.UseStmt,
+                    n.ModuleDef,
+                    n.DenDef,
+                    n.MaskDef,
+                    n.ProbeDef,
+                    n.PackDef,
+                ),
+            ):
                 continue
             self.execute(item)
 
         if run_main:
             if main_def is None:
                 raise ImmRuntimeError("marmot main is not defined")
+            if isinstance(main_def, n.HowlMainDef):
+                asyncio.run(self._run_howl_main(main_def))
+            else:
+                if main_def.insane:
+                    self.insane_depth += 1
+                try:
+                    self.execute_block(main_def.body, Environment(self.env))
+                finally:
+                    if main_def.insane:
+                        self.insane_depth -= 1
+
+    def run_probe_blocks(self, program):
+        self.prepare(program)
+        for item in program.items:
+            if isinstance(
+                item,
+                (
+                    n.FunctionDef,
+                    n.HowlFunctionDef,
+                    n.MainDef,
+                    n.HowlMainDef,
+                    n.UseStmt,
+                    n.ModuleDef,
+                    n.DenDef,
+                    n.MaskDef,
+                    n.ProbeDef,
+                    n.PackDef,
+                ),
+            ):
+                continue
+            self.execute(item)
+
+        results = []
+        for item in program.items:
+            if not isinstance(item, n.ProbeDef):
+                continue
+            self.probe_stack = (*self.probe_stack, item.name)
+            try:
+                self.execute_block(item.body, Environment(self.env))
+            except ImmRuntimeError as err:
+                results.append((item.name, False, str(err)))
+            else:
+                results.append((item.name, True, None))
+            finally:
+                self.probe_stack = self.probe_stack[:-1]
+        return results
+
+    def _expect_message(self):
+        if self.probe_stack:
+            return f"expect failed in probe {self.probe_stack[-1]}"
+        return "expect failed"
+
+    async def _run_howl_main(self, main_def):
+        if main_def.insane:
+            self.insane_depth += 1
+        self.howl_depth = self.howl_depth + 1
+        try:
+            await self.async_execute_block(main_def.body, Environment(self.env))
+        finally:
+            self.howl_depth = self.howl_depth - 1
             if main_def.insane:
+                self.insane_depth -= 1
+
+    async def async_execute_block(self, statements, env):
+        previous = self.env
+        self.env = env
+        try:
+            for stmt in statements:
+                await self.async_execute(stmt)
+        finally:
+            self.env = previous
+
+    async def async_execute(self, stmt):
+        if isinstance(stmt, n.LetStmt):
+            self.env.define(stmt.name, await self.async_evaluate(stmt.expr), stmt.const, stmt.type_name, type_context=self)
+            return
+        if isinstance(stmt, n.ExprStmt):
+            await self.async_evaluate(stmt.expr)
+            return
+        if isinstance(stmt, n.SqueakStmt):
+            values = [format_value(await self.async_evaluate(expr)) for expr in stmt.exprs]
+            self.output(" ".join(values))
+            return
+        if isinstance(stmt, n.PanicStmt):
+            raise ImmRuntimeError(format_value(await self.async_evaluate(stmt.expr)))
+        if isinstance(stmt, n.ExpectStmt):
+            value = await self.async_evaluate(stmt.expr)
+            if type(value) is not bool:
+                raise ImmRuntimeError("expect expression must be Bool")
+            if not value:
+                raise ImmRuntimeError(self._expect_message())
+            return
+        if isinstance(stmt, n.TraceStmt):
+            if self.trace_enabled:
+                values = [format_value(await self.async_evaluate(expr)) for expr in stmt.exprs]
+                payload = " ".join(values)
+                self.trace_output(f"[trace] {payload}" if payload else "[trace]")
+            return
+        if isinstance(stmt, n.IfStmt):
+            if self._require_bool(await self.async_evaluate(stmt.condition), "if condition"):
+                await self.async_execute_block(stmt.then_body, Environment(self.env))
+            elif stmt.else_body is not None:
+                if isinstance(stmt.else_body, n.IfStmt):
+                    await self.async_execute(stmt.else_body)
+                else:
+                    await self.async_execute_block(stmt.else_body, Environment(self.env))
+            return
+        if isinstance(stmt, n.WhileStmt):
+            while self._require_bool(await self.async_evaluate(stmt.condition), "while condition"):
+                try:
+                    await self.async_execute_block(stmt.body, Environment(self.env))
+                except ContinueSignal:
+                    continue
+                except BreakSignal:
+                    break
+            return
+        if isinstance(stmt, n.ForStmt):
+            iterable = await self.async_evaluate(stmt.iterable)
+            if iterable is None:
+                raise ImmRuntimeError("cannot iterate null")
+            if stmt.insane:
                 self.insane_depth += 1
             try:
-                self.execute_block(main_def.body, Environment(self.env))
+                values = list(iterable)
+                if stmt.insane:
+                    random.shuffle(values)
+                for value in values:
+                    loop_env = Environment(self.env)
+                    loop_env.define(stmt.name, value, type_context=self)
+                    try:
+                        await self.async_execute_block(stmt.body, loop_env)
+                    except ContinueSignal:
+                        continue
+                    except BreakSignal:
+                        break
             finally:
-                if main_def.insane:
+                if stmt.insane:
                     self.insane_depth -= 1
+            return
+        if isinstance(stmt, n.ReturnStmt):
+            raise ReturnSignal(await self.async_evaluate(stmt.expr) if stmt.expr is not None else None)
+        if isinstance(stmt, n.BreakStmt):
+            raise BreakSignal()
+        if isinstance(stmt, n.ContinueStmt):
+            raise ContinueSignal()
+        if isinstance(stmt, n.TryStmt):
+            try:
+                await self.async_execute_block(stmt.body, Environment(self.env))
+            except ImmRuntimeError as err:
+                if stmt.insane and stmt.catch_body is None:
+                    return
+                if stmt.catch_body is None:
+                    raise
+                catch_env = Environment(self.env)
+                catch_env.define(stmt.catch_name, str(err), type_context=self)
+                await self.async_execute_block(stmt.catch_body, catch_env)
+            return
+        if isinstance(stmt, n.InsaneBlock):
+            self.insane_depth += 1
+            try:
+                await self.async_execute_block(stmt.body, Environment(self.env))
+            finally:
+                self.insane_depth -= 1
+            return
+        if isinstance(
+            stmt,
+            (
+                n.UseStmt,
+                n.ModuleDef,
+                n.FunctionDef,
+                n.HowlFunctionDef,
+                n.MainDef,
+                n.HowlMainDef,
+                n.ProbeDef,
+                n.PackDef,
+            ),
+        ):
+            return
+        raise ImmRuntimeError(f"unknown statement {type(stmt).__name__}")
+
+    async def async_evaluate(self, expr):
+        if isinstance(expr, n.Literal):
+            return expr.value
+        if isinstance(expr, n.Var):
+            return self._cell_value(self.env.get_cell(expr.name))
+        if isinstance(expr, n.ArrayLiteral):
+            return [await self.async_evaluate(item) for item in expr.items]
+        if isinstance(expr, n.MapLiteral):
+            result = {}
+            for key_expr, value_expr in expr.pairs:
+                key = await self.async_evaluate(key_expr)
+                if not isinstance(key, str):
+                    raise ImmRuntimeError("map literal keys must be String")
+                result[key] = await self.async_evaluate(value_expr)
+            return result
+        if isinstance(expr, n.MatrixLiteral):
+            return Matrix([await self.async_evaluate(row) for row in expr.rows])
+        if isinstance(expr, n.PointLiteral):
+            x = await self.async_evaluate(expr.x)
+            y = await self.async_evaluate(expr.y)
+            if type(x) is not int or type(y) is not int:
+                raise ImmRuntimeError("@point requires Int x and y")
+            return Point(x, y)
+        if isinstance(expr, n.HatchExpr):
+            args = [await self.async_evaluate(arg) for arg in expr.args]
+            return self._hatch(expr.name, args)
+        if isinstance(expr, n.SniffExpr):
+            return self.input_func()
+        if isinstance(expr, n.Unary):
+            value = await self.async_evaluate(expr.expr)
+            if expr.op == "-":
+                return -value
+            if expr.op == "!":
+                return not self._require_bool(value, "! operand")
+            raise ImmRuntimeError(f"unknown unary operator {expr.op}")
+        if isinstance(expr, n.Binary):
+            return await self._async_binary(expr)
+        if isinstance(expr, n.RangeExpr):
+            start = await self.async_evaluate(expr.start)
+            end = await self.async_evaluate(expr.end)
+            if type(start) is not int or type(end) is not int:
+                raise ImmRuntimeError("range bounds must be Int")
+            return range(start, end)
+        if isinstance(expr, n.Call):
+            callee = await self.async_evaluate(expr.callee)
+            args = [await self.async_evaluate(arg) for arg in expr.args]
+            return await self.async_call_value(callee, args)
+        if isinstance(expr, n.Index):
+            target = await self.async_evaluate(expr.target)
+            args = [await self.async_evaluate(arg) for arg in expr.args]
+            return self._get_index(target, args)
+        if isinstance(expr, n.Member):
+            return self._get_member(await self.async_evaluate(expr.target), expr.name)
+        if isinstance(expr, n.Assign):
+            value = await self.async_evaluate(expr.value)
+            return self._assign_async_target(expr.target, value)
+        if isinstance(expr, n.LambdaExpr):
+            return LambdaFunction(expr.params, expr.body, expr.is_block, self.env)
+        if isinstance(expr, n.TunnelExpr):
+            value = await self.async_evaluate(expr.left)
+            return await self._async_eval_tunnel(value, expr.right)
+        if isinstance(expr, n.InsaneChoose):
+            values = await self.async_evaluate(expr.expr)
+            if values is None or len(values) == 0:
+                return None
+            return random.choice(list(values))
+        if isinstance(expr, n.WaitExpr):
+            return await self._await_value(await self.async_evaluate(expr.expr))
+        if isinstance(expr, n.ScatterExpr):
+            return self._scatter(expr.expr, expr.insane)
+        if isinstance(expr, n.NestExpr):
+            return TaskGroup([self._scatter(item.expr, item.insane) for item in expr.items])
+        raise ImmRuntimeError(f"unknown expression {type(expr).__name__}")
+
+    async def async_call_value(self, callee, args):
+        return self.call_value(callee, args)
+
+    async def _await_value(self, value):
+        if isinstance(value, TaskGroup):
+            return await value.wait()
+        if isinstance(value, ImmTask):
+            return await value.wait()
+        raise ImmRuntimeError(f"wait expects Task, got {type_name(value)}")
+
+    def _scatter(self, expr, insane=False):
+        captured_env = self.env
+
+        async def runner():
+            previous = self.env
+            self.env = captured_env
+            if insane:
+                self.insane_depth += 1
+            try:
+                value = await self.async_evaluate(expr)
+                if isinstance(value, (ImmTask, TaskGroup)):
+                    return await self._await_value(value)
+                return value
+            finally:
+                if insane:
+                    self.insane_depth -= 1
+                self.env = previous
+
+        return ImmTask(runner, name="scatter", scheduled=True)
+
+    async def _async_binary(self, expr):
+        if expr.op == "&&":
+            left = self._require_bool(await self.async_evaluate(expr.left), "left side of &&")
+            if not left:
+                return False
+            return self._require_bool(await self.async_evaluate(expr.right), "right side of &&")
+        if expr.op == "||":
+            left = self._require_bool(await self.async_evaluate(expr.left), "left side of ||")
+            if left:
+                return True
+            return self._require_bool(await self.async_evaluate(expr.right), "right side of ||")
+        left = await self.async_evaluate(expr.left)
+        right = await self.async_evaluate(expr.right)
+        return self._apply_binary(expr.op, left, right)
+
+    async def _async_eval_tunnel(self, value, right):
+        if isinstance(right, n.Call):
+            callee = await self.async_evaluate(right.callee)
+            args = [value] + [await self.async_evaluate(arg) for arg in right.args]
+            return await self.async_call_value(callee, args)
+        callee = await self.async_evaluate(right)
+        return await self.async_call_value(callee, [value])
+
+    def _assign_async_target(self, target, value):
+        return self._assign(target, value)
 
     def _register_mask(self, item):
         if item.name in self.masks or item.name in self.dens:
@@ -620,6 +1094,19 @@ class Runtime:
             return
         if isinstance(stmt, n.PanicStmt):
             raise ImmRuntimeError(format_value(self.evaluate(stmt.expr)))
+        if isinstance(stmt, n.ExpectStmt):
+            value = self.evaluate(stmt.expr)
+            if type(value) is not bool:
+                raise ImmRuntimeError("expect expression must be Bool")
+            if not value:
+                raise ImmRuntimeError(self._expect_message())
+            return
+        if isinstance(stmt, n.TraceStmt):
+            if self.trace_enabled:
+                values = [format_value(self.evaluate(expr)) for expr in stmt.exprs]
+                payload = " ".join(values)
+                self.trace_output(f"[trace] {payload}" if payload else "[trace]")
+            return
         if isinstance(stmt, n.IfStmt):
             if self._require_bool(self.evaluate(stmt.condition), "if condition"):
                 self.execute_block(stmt.then_body, Environment(self.env))
@@ -686,7 +1173,19 @@ class Runtime:
             finally:
                 self.insane_depth -= 1
             return
-        if isinstance(stmt, (n.UseStmt, n.ModuleDef, n.FunctionDef, n.MainDef)):
+        if isinstance(
+            stmt,
+            (
+                n.UseStmt,
+                n.ModuleDef,
+                n.FunctionDef,
+                n.HowlFunctionDef,
+                n.MainDef,
+                n.HowlMainDef,
+                n.ProbeDef,
+                n.PackDef,
+            ),
+        ):
             return
         raise ImmRuntimeError(f"unknown statement {type(stmt).__name__}")
 
@@ -697,6 +1196,14 @@ class Runtime:
             return self._cell_value(self.env.get_cell(expr.name))
         if isinstance(expr, n.ArrayLiteral):
             return [self.evaluate(item) for item in expr.items]
+        if isinstance(expr, n.MapLiteral):
+            result = {}
+            for key_expr, value_expr in expr.pairs:
+                key = self.evaluate(key_expr)
+                if not isinstance(key, str):
+                    raise ImmRuntimeError("map literal keys must be String")
+                result[key] = self.evaluate(value_expr)
+            return result
         if isinstance(expr, n.MatrixLiteral):
             return Matrix([self.evaluate(row) for row in expr.rows])
         if isinstance(expr, n.PointLiteral):
@@ -748,6 +1255,12 @@ class Runtime:
             if values is None or len(values) == 0:
                 return None
             return random.choice(list(values))
+        if isinstance(expr, n.WaitExpr):
+            raise ImmRuntimeError("wait can only be used inside howl context")
+        if isinstance(expr, n.ScatterExpr):
+            raise ImmRuntimeError("scatter can only be used inside howl context")
+        if isinstance(expr, n.NestExpr):
+            raise ImmRuntimeError("nest can only be used inside howl context")
         raise ImmRuntimeError(f"unknown expression {type(expr).__name__}")
 
     def call_value(self, callee, args):
@@ -900,33 +1413,36 @@ class Runtime:
 
         left = self.evaluate(expr.left)
         right = self.evaluate(expr.right)
-        if expr.op == "+":
+        return self._apply_binary(expr.op, left, right)
+
+    def _apply_binary(self, op, left, right):
+        if op == "+":
             if isinstance(left, Point) and isinstance(right, Point):
                 return left + right
             if isinstance(left, str) or isinstance(right, str):
                 return format_value(left) + format_value(right)
             return left + right
-        if expr.op == "-":
+        if op == "-":
             return left - right
-        if expr.op == "*":
+        if op == "*":
             return left * right
-        if expr.op == "/":
+        if op == "/":
             return left / right
-        if expr.op == "%":
+        if op == "%":
             return left % right
-        if expr.op == "==":
+        if op == "==":
             return left == right
-        if expr.op == "!=":
+        if op == "!=":
             return left != right
-        if expr.op == "<":
+        if op == "<":
             return left < right
-        if expr.op == "<=":
+        if op == "<=":
             return left <= right
-        if expr.op == ">":
+        if op == ">":
             return left > right
-        if expr.op == ">=":
+        if op == ">=":
             return left >= right
-        raise ImmRuntimeError(f"unknown operator {expr.op}")
+        raise ImmRuntimeError(f"unknown operator {op}")
 
     def _get_index(self, target, args):
         if isinstance(target, Matrix):
@@ -949,6 +1465,15 @@ class Runtime:
                 if self.insane_depth > 0:
                     return None
                 raise ImmRuntimeError(f"string index out of bounds: {args[0]}") from err
+        if isinstance(target, dict):
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise ImmRuntimeError("map index must be one String")
+            try:
+                return target[args[0]]
+            except KeyError as err:
+                if self.insane_depth > 0:
+                    return None
+                raise ImmRuntimeError(f"map key not found: {args[0]}") from err
         raise ImmRuntimeError(f"{type_name(target)} is not indexable")
 
     def _set_index(self, target, args, value):
@@ -964,6 +1489,11 @@ class Runtime:
                     return value
                 raise ImmRuntimeError(f"array index out of bounds: {args[0]}") from err
             return value
+        if isinstance(target, dict):
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise ImmRuntimeError("map index must be one String")
+            target[args[0]] = value
+            return value
         raise ImmRuntimeError(f"{type_name(target)} is not assignable by index")
 
     def _get_member(self, target, name):
@@ -971,6 +1501,22 @@ class Runtime:
             raise ImmRuntimeError("null has no members")
         if isinstance(target, Namespace):
             return target.get(name)
+        if isinstance(target, Response):
+            if name in ("status", "headers", "body", "url", "ok"):
+                return getattr(target, name)
+            methods = {
+                "json": lambda: target.json(),
+                "text": lambda: target.text(),
+            }
+            if name in methods:
+                return BoundMethod(name, methods[name])
+        if isinstance(target, ImmTask):
+            methods = {
+                "done": lambda: target._done or (target._task is not None and target._task.done()),
+                "cancel": lambda: target.cancel(),
+            }
+            if name in methods:
+                return BoundMethod(name, methods[name])
         if isinstance(target, UnderProxy):
             return target.get(name)
         if isinstance(target, ObjectView):
@@ -996,6 +1542,12 @@ class Runtime:
             if name in methods:
                 return BoundMethod(name, methods[name])
         if isinstance(target, list):
+            methods = {
+                "len": lambda: len(target),
+            }
+            if name in methods:
+                return BoundMethod(name, methods[name])
+        if isinstance(target, dict):
             methods = {
                 "len": lambda: len(target),
             }
@@ -1048,6 +1600,7 @@ class Runtime:
             "map": BuiltinFunction("map", builtin_map, needs_runtime=True),
             "filter": BuiltinFunction("filter", builtin_filter, needs_runtime=True),
             "reduce": BuiltinFunction("reduce", builtin_reduce, needs_runtime=True),
+            "nap": BuiltinFunction("nap", builtin_nap),
         }
         for name, value in builtins.items():
             self.env.define(name, value, const=True)
@@ -1055,6 +1608,8 @@ class Runtime:
         self.env.define("path", self._path_namespace(), const=True)
         self.env.define("chaser", self._chaser_namespace(), const=True)
         self.env.define("store", self._store_namespace(), const=True)
+        self.env.define("web", self._web_namespace(), const=True)
+        self.env.define("tick", self._tick_namespace(), const=True)
 
     def _load_namespace(self, name):
         if name == "math":
@@ -1065,6 +1620,10 @@ class Runtime:
             return self._chaser_namespace()
         if name == "store":
             return self._store_namespace()
+        if name == "web":
+            return self._web_namespace()
+        if name == "tick":
+            return self._tick_namespace()
         if self.source_path is None:
             raise ImmRuntimeError(f"cannot resolve module {name}")
         module_path = self.source_path.parent / f"{name}.imm"
@@ -1085,17 +1644,36 @@ class Runtime:
             check_only=self.check_only,
             module_cache=self.module_cache,
             module_stack=[*self.module_stack, module_path],
+            trace_enabled=self.trace_enabled,
+            trace_output=self.trace_output,
         )
         program = parse(tokenize(source))
         if self.check_only:
             runtime.check(program)
         else:
             runtime.run(program, run_main=False)
-        hidden = set(core_names()) | {"math", "path", "chaser", "store"}
+        hidden = set(core_names()) | {"math", "path", "chaser", "store", "web", "tick"}
         exports = {key: cell.value for key, cell in runtime.env.values.items() if key not in hidden}
         namespace = Namespace(name, exports)
         self.module_cache[cache_key] = namespace
         return namespace
+
+    def _web_namespace(self):
+        return Namespace(
+            "web",
+            {
+                "grab": BuiltinFunction("web.grab", web_grab),
+                "fetch": BuiltinFunction("web.fetch", web_fetch),
+            },
+        )
+
+    def _tick_namespace(self):
+        return Namespace(
+            "tick",
+            {
+                "now": BuiltinFunction("tick.now", lambda: int(time.time() * 1000)),
+            },
+        )
 
     def _math_namespace(self):
         return Namespace(
@@ -1222,6 +1800,7 @@ class StaticChecker:
     BOOL = StaticType("Bool")
     STRING = StaticType("String")
     POINT = StaticType("Point")
+    RESPONSE = StaticType("Response")
 
     def __init__(self, runtime):
         self.runtime = runtime
@@ -1229,17 +1808,24 @@ class StaticChecker:
         self.current_return = self.VOID
         self.current_den = None
         self.loop_depth = 0
+        self.howl_depth = 0
         self._install_globals()
 
     def check(self, items):
         for item in items:
             if isinstance(item, n.FunctionDef):
                 self._check_function(item)
+            elif isinstance(item, n.HowlFunctionDef):
+                self._check_howl_function(item)
             elif isinstance(item, n.MainDef):
                 self._check_block(item.body, StaticEnv(self.global_env), self.VOID)
+            elif isinstance(item, n.HowlMainDef):
+                self._check_howl_block(item.body, StaticEnv(self.global_env), self.VOID)
             elif isinstance(item, n.DenDef):
                 self._check_den(item)
-            elif not isinstance(item, (n.UseStmt, n.ModuleDef, n.MaskDef)):
+            elif isinstance(item, n.ProbeDef):
+                self._check_block(item.body, StaticEnv(self.global_env), self.VOID)
+            elif not isinstance(item, (n.UseStmt, n.ModuleDef, n.MaskDef, n.PackDef)):
                 self._check_stmt(item, self.global_env)
 
     def _install_globals(self):
@@ -1252,13 +1838,19 @@ class StaticChecker:
         self.global_env.define("map", StaticFunction((self.ANY, self.ANY), self.ANY, "map", "map"), const=True)
         self.global_env.define("filter", StaticFunction((self.ANY, self.ANY), self.ANY, "filter", "filter"), const=True)
         self.global_env.define("reduce", StaticFunction((self.ANY, self.ANY, self.ANY), self.ANY, "reduce", "reduce"), const=True)
+        self.global_env.define("nap", StaticFunction((self.INT,), StaticType("Task", (self.VOID,)), "nap"), const=True)
         self.global_env.define("math", StaticType("Module", (StaticType("math"),)), const=True)
         self.global_env.define("path", StaticType("Module", (StaticType("path"),)), const=True)
         self.global_env.define("chaser", StaticType("Module", (StaticType("chaser"),)), const=True)
         self.global_env.define("store", StaticType("Module", (StaticType("store"),)), const=True)
+        self.global_env.define("web", StaticType("Module", (StaticType("web"),)), const=True)
+        self.global_env.define("tick", StaticType("Module", (StaticType("tick"),)), const=True)
         for name, cell in self.runtime.env.values.items():
             value = cell.value
-            if isinstance(value, UserFunction):
+            if isinstance(value, HowlFunction):
+                sig = self._function_sig(value.params, value.return_type, name)
+                self.global_env.define(name, StaticFunction(sig.params, StaticType("Task", (sig.return_type,)), name), const=True)
+            elif isinstance(value, UserFunction):
                 self.global_env.define(name, self._function_sig(value.params, value.return_type, name), const=True)
             elif isinstance(value, Namespace):
                 self.global_env.define(name, StaticType("Module", (StaticType(value.name),)), const=True)
@@ -1272,6 +1864,19 @@ class StaticChecker:
         for param in item.params:
             env.define(param.name, self._ann(param.type_name))
         self._check_block(item.body, env, self._ann(item.return_type))
+
+    def _check_howl_function(self, item):
+        env = StaticEnv(self.global_env)
+        for param in item.params:
+            env.define(param.name, self._ann(param.type_name))
+        self._check_howl_block(item.body, env, self._ann(item.return_type))
+
+    def _check_howl_block(self, body, env, return_type):
+        self.howl_depth += 1
+        try:
+            self._check_block(body, env, return_type)
+        finally:
+            self.howl_depth -= 1
 
     def _check_den(self, item):
         den_type = self.runtime.dens[item.name]
@@ -1328,6 +1933,14 @@ class StaticChecker:
         if isinstance(stmt, n.PanicStmt):
             self._expr_type(stmt.expr, env)
             return
+        if isinstance(stmt, n.ExpectStmt):
+            expr_type = self._expr_type(stmt.expr, env)
+            self.require_assignable(expr_type, self.BOOL, "expect expression")
+            return
+        if isinstance(stmt, n.TraceStmt):
+            for expr in stmt.exprs:
+                self._expr_type(expr, env)
+            return
         if isinstance(stmt, n.IfStmt):
             cond = self._expr_type(stmt.condition, env)
             self.require_assignable(cond, self.BOOL, "if condition")
@@ -1380,7 +1993,21 @@ class StaticChecker:
         if isinstance(stmt, n.InsaneBlock):
             self._check_block(stmt.body, StaticEnv(env), self.current_return)
             return
-        if isinstance(stmt, (n.UseStmt, n.ModuleDef, n.FunctionDef, n.MainDef, n.DenDef, n.MaskDef)):
+        if isinstance(
+            stmt,
+            (
+                n.UseStmt,
+                n.ModuleDef,
+                n.FunctionDef,
+                n.HowlFunctionDef,
+                n.MainDef,
+                n.HowlMainDef,
+                n.DenDef,
+                n.MaskDef,
+                n.ProbeDef,
+                n.PackDef,
+            ),
+        ):
             return
         raise ImmRuntimeError(f"unknown statement {type(stmt).__name__}")
 
@@ -1392,6 +2019,11 @@ class StaticChecker:
         if isinstance(expr, n.ArrayLiteral):
             item_types = [self._expr_type(item, env) for item in expr.items]
             return StaticType("Array", (self._unify(item_types),))
+        if isinstance(expr, n.MapLiteral):
+            for key, value in expr.pairs:
+                self.require_assignable(self._expr_type(key, env), self.STRING, "map key")
+                self._expr_type(value, env)
+            return StaticType("Map", (self.ANY,))
         if isinstance(expr, n.MatrixLiteral):
             row_types = []
             for row in expr.rows:
@@ -1447,6 +2079,36 @@ class StaticChecker:
             if values_type.name == "Array" and values_type.args:
                 return values_type.args[0]
             return self.ANY
+        if isinstance(expr, n.WaitExpr):
+            if self.howl_depth == 0:
+                raise ImmRuntimeError("wait can only be used inside howl context")
+            waited = self._expr_type(expr.expr, env)
+            if isinstance(waited, StaticType) and waited.name == "Task":
+                return waited.args[0] if waited.args else self.ANY
+            if isinstance(waited, StaticType) and waited.name == "TaskGroup":
+                item = waited.args[0] if waited.args else self.ANY
+                return StaticType("Array", (item,))
+            if isinstance(waited, StaticType) and waited.name == "Any":
+                return self.ANY
+            raise ImmRuntimeError(f"wait expects Task, got {self._type_text(waited)}")
+        if isinstance(expr, n.ScatterExpr):
+            if self.howl_depth == 0:
+                raise ImmRuntimeError("scatter can only be used inside howl context")
+            result = self._expr_type(expr.expr, env)
+            if isinstance(result, StaticType) and result.name == "Task":
+                return result
+            return StaticType("Task", (result,))
+        if isinstance(expr, n.NestExpr):
+            if self.howl_depth == 0:
+                raise ImmRuntimeError("nest can only be used inside howl context")
+            item_types = []
+            for item in expr.items:
+                result = self._expr_type(item.expr, env)
+                if isinstance(result, StaticType) and result.name == "Task":
+                    item_types.append(result.args[0] if result.args else self.ANY)
+                else:
+                    item_types.append(result)
+            return StaticType("TaskGroup", (self._unify(item_types),))
         return self.ANY
 
     def _literal_type(self, value):
@@ -1571,6 +2233,11 @@ class StaticChecker:
                 raise ImmRuntimeError("string index expects one argument")
             self.require_assignable(arg_types[0], self.INT, "string index")
             return self.STRING
+        if target_type.name == "Map":
+            if len(arg_types) != 1:
+                raise ImmRuntimeError("map index expects one argument")
+            self.require_assignable(arg_types[0], self.STRING, "map index")
+            return target_type.args[0] if target_type.args else self.ANY
         if target_type.name == "Any":
             return self.ANY
         raise ImmRuntimeError(f"{target_type.text()} is not indexable")
@@ -1602,6 +2269,28 @@ class StaticChecker:
                 "to_int": StaticFunction((), self.INT, "String.to_int"),
                 "to_float": StaticFunction((), self.FLOAT, "String.to_float"),
                 "to_bool": StaticFunction((), self.BOOL, "String.to_bool"),
+            }
+            if name in methods:
+                return methods[name]
+        if target_type.name == "Map":
+            if name == "len":
+                return StaticFunction((), self.INT, "Map.len")
+        if target_type.name == "Response":
+            fields = {
+                "status": self.INT,
+                "headers": StaticType("Map", (self.STRING,)),
+                "body": self.STRING,
+                "url": self.STRING,
+                "ok": self.BOOL,
+                "json": StaticFunction((), self.ANY, "Response.json"),
+                "text": StaticFunction((), self.STRING, "Response.text"),
+            }
+            if name in fields:
+                return fields[name]
+        if target_type.name == "Task":
+            methods = {
+                "done": StaticFunction((), self.BOOL, "Task.done"),
+                "cancel": StaticFunction((), self.BOOL, "Task.cancel"),
             }
             if name in methods:
                 return methods[name]
@@ -1660,6 +2349,16 @@ class StaticChecker:
             }
             if name in methods:
                 return methods[name]
+        if module == "web":
+            methods = {
+                "grab": StaticFunction((self.ANY,), self.RESPONSE, "web.grab"),
+                "fetch": StaticFunction((self.ANY,), StaticType("Task", (self.RESPONSE,)), "web.fetch"),
+            }
+            if name in methods:
+                return methods[name]
+        if module == "tick":
+            if name == "now":
+                return StaticFunction((), self.INT, "tick.now")
         return self.ANY
 
     def _under_member_type(self, parent_name, name):
@@ -1750,6 +2449,15 @@ class StaticChecker:
             self.require_assignable(actual.args[0] if actual.args else self.ANY, expected.args[0] if expected.args else self.ANY, label)
             return
         if expected.name == "Matrix" and actual.name == "Matrix":
+            self.require_assignable(actual.args[0] if actual.args else self.ANY, expected.args[0] if expected.args else self.ANY, label)
+            return
+        if expected.name == "Map" and actual.name == "Map":
+            self.require_assignable(actual.args[0] if actual.args else self.ANY, expected.args[0] if expected.args else self.ANY, label)
+            return
+        if expected.name == "Task" and actual.name == "Task":
+            self.require_assignable(actual.args[0] if actual.args else self.ANY, expected.args[0] if expected.args else self.ANY, label)
+            return
+        if expected.name == "TaskGroup" and actual.name == "TaskGroup":
             self.require_assignable(actual.args[0] if actual.args else self.ANY, expected.args[0] if expected.args else self.ANY, label)
             return
         if expected.name in self.runtime.dens and actual.name in self.runtime.dens and self.runtime.dens[actual.name].is_a(expected.name):
@@ -1846,6 +2554,95 @@ def builtin_reduce(runtime, values, initial, fn):
     for value in values:
         acc = runtime.call_value(fn, [acc, value])
     return acc
+
+
+def builtin_nap(ms):
+    if type(ms) is not int:
+        raise ImmRuntimeError("nap expects Int milliseconds")
+    if ms < 0:
+        raise ImmRuntimeError("nap milliseconds must be >= 0")
+
+    async def runner():
+        await asyncio.sleep(ms / 1000)
+        return None
+
+    return ImmTask(runner, name="nap")
+
+
+def web_fetch(options):
+    async def runner():
+        return await asyncio.to_thread(web_grab, options)
+
+    return ImmTask(runner, name="web.fetch")
+
+
+def web_grab(options):
+    request_options = normalize_web_options(options)
+    data = None
+    if request_options["body"] is not None:
+        data = request_options["body"].encode("utf-8")
+    request = urllib.request.Request(
+        request_options["url"],
+        data=data,
+        headers=request_options["headers"],
+        method=request_options["method"],
+    )
+    timeout = request_options["timeout_ms"] / 1000
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+            return Response(response.status, dict(response.headers.items()), body, response.geturl())
+    except urllib.error.HTTPError as err:
+        body = err.read().decode(err.headers.get_content_charset() or "utf-8", errors="replace")
+        return Response(err.code, dict(err.headers.items()), body, err.geturl())
+    except urllib.error.URLError as err:
+        reason = getattr(err, "reason", err)
+        raise ImmRuntimeError(f"network request failed: {reason}") from err
+    except TimeoutError as err:
+        raise ImmRuntimeError("network request timed out") from err
+    except ValueError as err:
+        raise ImmRuntimeError(f"invalid URL: {err}") from err
+
+
+def normalize_web_options(options):
+    if isinstance(options, str):
+        result = {
+            "method": "GET",
+            "url": options,
+            "headers": {},
+            "body": None,
+            "timeout_ms": 10000,
+        }
+    elif isinstance(options, dict):
+        result = {
+            "method": options.get("method", "GET"),
+            "url": options.get("url"),
+            "headers": options.get("headers", {}),
+            "body": options.get("body", None),
+            "timeout_ms": options.get("timeout_ms", 10000),
+        }
+    else:
+        raise ImmRuntimeError("web request expects String URL or Map options")
+    if not isinstance(result["method"], str):
+        raise ImmRuntimeError("web request method must be String")
+    result["method"] = result["method"].upper()
+    if not isinstance(result["url"], str) or not result["url"]:
+        raise ImmRuntimeError("web request url must be String")
+    if not isinstance(result["headers"], dict):
+        raise ImmRuntimeError("web request headers must be Map")
+    headers = {}
+    for key, value in result["headers"].items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ImmRuntimeError("web request headers must be Map<String, String>")
+        headers[key] = value
+    result["headers"] = headers
+    if result["body"] is not None and not isinstance(result["body"], str):
+        raise ImmRuntimeError("web request body must be String or Null")
+    if type(result["timeout_ms"]) is not int:
+        raise ImmRuntimeError("web request timeout_ms must be Int")
+    if result["timeout_ms"] <= 0:
+        raise ImmRuntimeError("web request timeout_ms must be > 0")
+    return result
 
 
 def path_bfs(runtime, field, start, goal, passable):
@@ -2166,7 +2963,7 @@ def _reconstruct_path(came_from, current):
 
 
 def core_names():
-    return {"len", "type", "str", "int", "float", "bool", "map", "filter", "reduce"}
+    return {"len", "type", "str", "int", "float", "bool", "map", "filter", "reduce", "nap"}
 
 
 def same_signature(left, right):
@@ -2251,10 +3048,18 @@ def _check_type_ref(value, type_ref, label, runtime=None):
         ok = isinstance(value, str)
     elif base == "Array":
         ok = isinstance(value, list)
+    elif base == "Map":
+        ok = isinstance(value, dict)
     elif base == "Matrix":
         ok = isinstance(value, Matrix)
     elif base == "Point":
         ok = isinstance(value, Point)
+    elif base == "Response":
+        ok = isinstance(value, Response)
+    elif base == "Task":
+        ok = isinstance(value, ImmTask)
+    elif base == "TaskGroup":
+        ok = isinstance(value, TaskGroup)
     elif base == "Null":
         ok = value is None
     else:
@@ -2287,6 +3092,12 @@ def _check_type_ref(value, type_ref, label, runtime=None):
         for y, row in enumerate(value.rows):
             for x, item in enumerate(row):
                 _check_type_ref(item, item_type, f"{label}[{y}, {x}]", runtime)
+    elif base == "Map" and type_ref.args:
+        if len(type_ref.args) != 1:
+            raise ImmRuntimeError("Map expects one type argument")
+        item_type = type_ref.args[0]
+        for key, item in value.items():
+            _check_type_ref(item, item_type, f"{label}[{key}]", runtime)
 
 
 def format_type_ref(type_ref):
@@ -2308,10 +3119,18 @@ def type_name(value):
         return "String"
     if isinstance(value, list):
         return "Array"
+    if isinstance(value, dict):
+        return "Map"
     if isinstance(value, Matrix):
         return "Matrix"
     if isinstance(value, Point):
         return "Point"
+    if isinstance(value, Response):
+        return "Response"
+    if isinstance(value, ImmTask):
+        return "Task"
+    if isinstance(value, TaskGroup):
+        return "TaskGroup"
     if isinstance(value, Namespace):
         return "Module"
     if isinstance(value, ObjectInstance):
@@ -2342,6 +3161,15 @@ def format_value(value):
         return str(value)
     if isinstance(value, StoreDatabase):
         return str(value)
+    if isinstance(value, Response):
+        return str(value)
+    if isinstance(value, ImmTask):
+        return str(value)
+    if isinstance(value, TaskGroup):
+        return str(value)
     if isinstance(value, list):
         return "[" + ", ".join(format_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        items = [f"{format_value(key)}: {format_value(item)}" for key, item in value.items()]
+        return "{" + ", ".join(items) + "}"
     return str(value)

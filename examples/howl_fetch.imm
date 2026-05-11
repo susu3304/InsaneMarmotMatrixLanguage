@@ -1,0 +1,7 @@
+use web
+
+howl marmot main {
+    let res = wait web.fetch("data:text/plain,howl-ok")
+    squeak res.status
+    squeak res.text()
+}

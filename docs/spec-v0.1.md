@@ -5,10 +5,14 @@
 ## 基本
 
 - 実行コマンド: `imm run main.imm`
+- trace 付き実行: `imm run main.imm --trace`
 - 構文チェック: `imm check main.imm`
 - フォーマット: `imm fmt main.imm`
+- テスト: `imm probe` / `imm law`
+- パッケージ: `imm pack main.imm --pelt python`
 - 機械可読メタデータ: `imm spec --json`
 - エントリーポイント: `marmot main`
+- async エントリーポイント: `howl marmot main`
 - 狂気エントリーポイント: `insane marmot main`
 - 出力: `squeak`
 - 入力: `sniff`
@@ -113,6 +117,40 @@ insane try {
 }
 ```
 
+## howl とタスク
+
+`howl dig` は async 関数を定義し、呼び出すと `Task<T>` を返す。
+`howl marmot main` の中では `wait`、`scatter`、`nest` を使える。
+
+```imm
+howl dig load() -> String {
+    wait nap(10)
+    return "ok"
+}
+
+howl marmot main {
+    let task = scatter load()
+    squeak wait task
+}
+```
+
+`wait` は `Task<T>` を `T` に、`TaskGroup<T>` を `Array<T>` に変換する。
+`scatter expr` は並行タスクを開始する。`nest { scatter ... }` は複数の
+タスクをまとめ、待機時に字句順の結果配列を返す。
+
+## probe / expect / trace
+
+`probe` は IMM レベルのテストブロックで、`expect expr` が `true` でなければ失敗する。
+
+```imm
+probe "add" {
+    expect 1 + 1 == 2
+}
+```
+
+`trace expr` は `imm run --trace` のときだけ stderr に出力する。通常の
+`squeak` 出力とは分離される。
+
 ## 標準ライブラリ
 
 `core` はデフォルト読み込みとし、`len`、`type`、`str`、`int`、`float`、`bool`、`map`、`filter`、`reduce` を提供する。
@@ -124,3 +162,22 @@ insane try {
 `chaser` は CHaser 風ボット向けに `direction`、`step`、`parse_field`、`safe_moves`、`random_move` を提供する。
 
 `store` は外部DBなしの標準永続化機能として、`den` オブジェクトを `.immstore` ファイルへ保存・復元する `open`、`save`、`load`、`all`、`find`、`get`、`delete`、`count`、`clear` を提供する。
+
+`web` は同期 HTTP の `grab` と async HTTP の `fetch` を提供する。
+戻り値 `Response` は `status`、`headers`、`body`、`url`、`ok`、`text()`、`json()` を持つ。
+
+`tick` は `now()` で UNIX ミリ秒を返す。`nap(ms)` は howl タスクとしてスリープする。
+
+## pack
+
+`pack` ブロックまたは `imm pack` で Python pelt の zipapp artifact を作成できる。
+
+```imm
+pack {
+    entry "examples/hello.imm"
+    crate "dist/hello.pyz"
+    pelt "python"
+}
+```
+
+`--pelt native` は native runtime が law suite に合格するまで互換性ゲートで無効とする。

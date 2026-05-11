@@ -11,7 +11,7 @@ Status legend:
 | File loading, UTF-8, LF/CRLF | done | `.imm` files are read as UTF-8 and CRLF is normalized by the lexer. |
 | Single-line and block comments | done | `#` and `/* ... */` are ignored by the lexer. |
 | `marmot main` | done | Safe and `insane marmot main` entry points are accepted. |
-| Keywords | partial | Reserved words are tokenized, but the parser still accepts some keywords as names in permissive positions. |
+| Keywords | partial | The networking/task/test/pack expansion words are reserved. Some older contextual words remain accepted as names for source compatibility. |
 | Newline statements and semicolons | partial | Newlines and semicolons work for common cases. Parser recovery is not implemented. |
 | Blocks | done | `{ ... }` blocks with lexical scope are implemented. |
 | Basic values | done | `Int`, `Float`, `Bool`, `String`, `Array`, `Matrix`, `Point`, and `Null` exist at runtime. |
@@ -43,12 +43,22 @@ Status legend:
 | `math` library | done | Required math functions are available. |
 | `path` library | done | Basic BFS and A* are available. |
 | `store` library | partial | Built-in JSON-backed object persistence supports open/save/load/all/find/get/delete/count/clear for `den` objects. Transactions, indexes, and concurrent writers are planned. |
+| `web` library | done | `web.grab` and `web.fetch` use the Python standard library, return `Response`, expose fields/methods, and keep HTTP error statuses as values. |
+| `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run on an isolated asyncio-backed task layer. |
+| `tick` library | done | `tick.now()` returns UNIX milliseconds. |
+| `probe` / `expect` | done | Probe blocks parse, check, and run through `imm probe`; failed expects report the file and probe name. |
+| `law` suite | done | `imm law` runs shared `.law.imm` probe files under `laws/`. |
+| `trace` | done | `trace` writes to stderr only when `imm run --trace` is enabled. |
 | Block/function scope | done | Nested lexical environments and shadowing are implemented. |
 | Static type system | partial | Runtime checks exist, and `imm check` checks functions, methods, main blocks, conditions, assignments, returns, calls, object members, mask views, literal declarations, and field initializers. Full flow-sensitive checking and source spans are planned. |
 | Null safety | partial | Safe-mode runtime errors exist. Insane-mode relaxed behavior is planned. |
 | `imm run` | done | Runs `.imm` files. |
 | `imm check` | partial | Parses, prepares declarations, resolves modules, detects module cycles, and performs broad static checks without executing top-level statements or `marmot main`. Source-span diagnostics are planned. |
 | `imm fmt` | partial | Preserves comments/strings and normalizes indentation, line endings, and trailing whitespace. Full AST-preserving reflow is planned. |
+| `imm probe` | done | Discovers `tests/imm/*.probe.imm` by default or runs explicit files. |
+| `imm law` | done | Runs the conformance probes in `laws/`. |
+| `imm pack --pelt python` | done | Produces a runnable zipapp artifact containing the interpreter and entry-directory IMM sources. |
+| Native runtime track | planned | `native/` records the law-gated parity plan; `--pelt native` remains disabled until a native runtime passes the core law suite. |
 | Machine-readable spec output | done | `imm spec --json` emits language metadata. |
 | VM, bytecode, LSP | planned | Advanced tooling milestones. |
 | CHaser runtime | partial | `chaser` helpers are available for directions, steps, field parsing, safe moves, and random moves. Full turn-loop runtime is planned. |

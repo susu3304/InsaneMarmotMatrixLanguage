@@ -13,7 +13,21 @@ class MainDef:
 
 
 @dataclass
+class HowlMainDef:
+    body: list
+    insane: bool = False
+
+
+@dataclass
 class FunctionDef:
+    name: str
+    params: list
+    return_type: str | None
+    body: list
+
+
+@dataclass
+class HowlFunctionDef:
     name: str
     params: list
     return_type: str | None
@@ -72,6 +86,19 @@ class UseStmt:
 @dataclass
 class ModuleDef:
     name: str
+
+
+@dataclass
+class ProbeDef:
+    name: str
+    body: list
+
+
+@dataclass
+class PackDef:
+    entry: str | None
+    crate: str | None
+    pelt: str | None
 
 
 @dataclass
@@ -134,6 +161,16 @@ class PanicStmt:
 
 
 @dataclass
+class ExpectStmt:
+    expr: object
+
+
+@dataclass
+class TraceStmt:
+    exprs: list
+
+
+@dataclass
 class TryStmt:
     body: list
     catch_name: str | None
@@ -183,6 +220,11 @@ class ArrayLiteral:
 @dataclass
 class MatrixLiteral:
     rows: list
+
+
+@dataclass
+class MapLiteral:
+    pairs: list
 
 
 @dataclass
@@ -237,6 +279,22 @@ class TunnelExpr:
 @dataclass
 class InsaneChoose:
     expr: object
+
+
+@dataclass
+class WaitExpr:
+    expr: object
+
+
+@dataclass
+class ScatterExpr:
+    expr: object
+    insane: bool = False
+
+
+@dataclass
+class NestExpr:
+    items: list
 
 
 @dataclass

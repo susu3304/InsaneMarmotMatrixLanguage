@@ -1,0 +1,15 @@
+howl dig work(x: Int) -> Int {
+    wait nap(10)
+    return x * 2
+}
+
+howl marmot main {
+    let group = nest {
+        scatter work(1)
+        scatter work(2)
+        scatter work(3)
+    }
+
+    squeak wait group
+    squeak tick.now() > 0
+}
