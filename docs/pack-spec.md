@@ -11,10 +11,9 @@ The Python pelt is implemented with the standard-library zipapp format. It
 bundles `imm_lang` and `.imm` sources from the entry directory, then extracts
 those sources to a temporary directory when the artifact runs.
 
-The first native pelt is implemented as the same executable bundle shape, gated
-by the Rust `imm-native` parity bridge and the shared law suite. This gives
-`--pelt native` a runnable single-file artifact while the Rust implementation
-keeps Python as the behavior oracle.
+The native pelt builds a small Rust wrapper that embeds the entry directory's
+`.imm` sources and links the `imm-native` evaluator. The resulting artifact runs
+without Python or a source checkout.
 
 Pack config can live in an IMM file:
 
@@ -31,7 +30,7 @@ CLI flags override `crate` and `pelt`. Supported pelt values:
 | Pelt | Status |
 | --- | --- |
 | `python` | implemented zipapp baseline |
-| `native` | implemented parity bridge executable tracked by `native/` |
+| `native` | implemented Python-free Rust executable |
 
 Required release checks for the native pelt:
 

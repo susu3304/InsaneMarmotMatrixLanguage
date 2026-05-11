@@ -169,11 +169,11 @@ The next slice should focus on static analysis:
 5. Start the source-span work needed for full diagnostics.
 
 The Rust migration slice completed the operational RUST-001 through RUST-018
-gate as a parity bridge: `imm-native` has the full CLI surface, Rust lexer/span
-foundations, cargo fmt/clippy/test coverage, shared law execution, and an
-enabled `imm pack --pelt native` executable artifact. The next native slice is
-to replace bridge-backed runtime behavior with a Python-free Rust evaluator
-module by module while keeping the same law gate green.
+gate: `imm-native` has the full CLI surface, Rust lexer/parser/evaluator
+coverage, cargo fmt/clippy/test coverage, shared law execution, and an enabled
+Python-free `imm pack --pelt native` executable artifact. The next native slice
+should harden diagnostics, broaden HTTP beyond deterministic `data:` URLs, and
+grow law coverage for every runtime surface.
 
 ## No More Placeholder Policy
 

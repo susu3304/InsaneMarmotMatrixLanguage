@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod bridge;
 pub mod checker;
 pub mod cli;
 pub mod diagnostics;

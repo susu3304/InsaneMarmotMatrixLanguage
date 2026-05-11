@@ -30,7 +30,7 @@ fn spec_json_is_parseable() {
 }
 
 #[test]
-fn run_delegates_to_reference_runtime() {
+fn run_executes_native_runtime() {
     let output = Command::new(env!("CARGO_BIN_EXE_imm-native"))
         .args(["run", "../../examples/hello.imm"])
         .output()
@@ -47,7 +47,7 @@ fn run_delegates_to_reference_runtime() {
 }
 
 #[test]
-fn law_delegates_to_shared_law_suite() {
+fn law_runs_shared_law_suite_natively() {
     let output = Command::new(env!("CARGO_BIN_EXE_imm-native"))
         .arg("law")
         .output()

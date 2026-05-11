@@ -51,7 +51,7 @@ Hello, insane marmot matrix!
 - `probe` / `expect` / `imm law`
 - `trace` と `imm run --trace`
 - `imm pack --pelt python` による zipapp パッケージ
-- `imm pack --pelt native` による実行可能 parity bridge パッケージ
+- `imm pack --pelt native` による Python-free Rust 実行バイナリ
 - `imm-native` Rust CLI による `run` / `check` / `fmt` / `probe` / `law` / `pack` / `spec`
 
 ## 例

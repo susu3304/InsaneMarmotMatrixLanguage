@@ -1,6 +1,7 @@
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipapp
@@ -255,10 +256,31 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 def build_native_pelt(entry, crate):
-    # The first native pelt is a parity bridge: one executable zipapp with the
-    # reference runtime and IMM sources embedded. The Rust CLI exercises the same
-    # law gate before this is promoted to a Python-free runtime binary.
-    build_python_pelt(entry, crate, interpreter=sys.executable)
+    root = Path(__file__).resolve().parents[1]
+    manifest = root / "native" / "imm-native" / "Cargo.toml"
+    result = subprocess.run(
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "--manifest-path",
+            str(manifest),
+            "--",
+            "pack",
+            str(entry),
+            "--crate",
+            str(crate),
+            "--pelt",
+            "native",
+        ],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "native pack failed"
+        raise ImmError(message)
 
 
 def build_parser():
