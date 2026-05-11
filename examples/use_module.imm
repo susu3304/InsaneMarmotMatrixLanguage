@@ -1,0 +1,5 @@
+use util
+
+marmot main {
+    squeak util.triple(7)
+}

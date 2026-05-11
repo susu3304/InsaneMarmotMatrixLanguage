@@ -1,0 +1,34 @@
+stash LIMIT: Int = 5
+
+dig add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+marmot main {
+    let nums = [1, 2, 3, 4]
+    let evens = nums tunnel filter(x => x % 2 == 0)
+    let doubled = evens tunnel map(x => x * 10)
+    let sum = doubled tunnel reduce(0, (acc, x) => acc + x)
+
+    squeak add(sum, 1)
+
+    let field = matrix [
+    [1, 2],
+    [3, 4]
+    ]
+
+    field[@point(1, 1)] = 9
+    squeak field[1, 1]
+
+    let i = 0
+    while i < LIMIT {
+        i = i + 1
+    }
+squeak i
+
+insane try {
+    panic "ignored"
+}
+
+squeak "survived"
+}

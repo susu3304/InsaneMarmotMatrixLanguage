@@ -1,0 +1,32 @@
+use store
+
+den Player {
+    fur let name: String
+    fang let hp: Int = 100
+
+    fur dig init(name: String) {
+        self.name = name
+    }
+
+fur dig damage(amount: Int) {
+    self.hp = self.hp - amount
+}
+
+fur dig status() {
+    squeak self.name + ": " + str(self.hp)
+}
+}
+
+marmot main {
+    let db = store.open("players.immstore")
+    store.clear(db, Player)
+
+    let p = hatch Player("susu")
+    p.damage(20)
+
+    let id = store.save(db, p)
+    let loaded: Player = store.load(db, Player, id)
+
+    loaded.status()
+    squeak store.count(db, Player)
+}

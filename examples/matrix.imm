@@ -1,0 +1,17 @@
+dig safe_moves(field, pos) {
+    return field.neighbors4(pos)
+    tunnel filter(p => field[p] == 0)
+}
+
+marmot main {
+    let field = matrix [
+    [0, 0, 1],
+    [0, 0, 0],
+    [1, 0, 0]
+    ]
+
+    let me = @point(1, 1)
+    let moves = safe_moves(field, me)
+
+    squeak moves
+}

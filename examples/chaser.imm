@@ -1,0 +1,37 @@
+dig safe_moves(field, pos) {
+    return field.neighbors4(pos)
+    tunnel filter(p => field[p] == 0)
+}
+
+dig decide(field, me) {
+    let safe = safe_moves(field, me)
+
+    if safe.len() == 0 {
+        return "STAY"
+    }
+
+let next = insane choose safe
+
+if next.x > me.x {
+    return "RIGHT"
+} else if next.x < me.x {
+return "LEFT"
+} else if next.y > me.y {
+return "DOWN"
+} else {
+return "UP"
+}
+}
+
+marmot main {
+    let field = matrix [
+    [0, 0, 0, 1],
+    [0, 1, 0, 0],
+    [0, 0, 0, 0],
+    [1, 0, 0, 0]
+    ]
+
+    let me = @point(1, 2)
+
+    squeak decide(field, me)
+}

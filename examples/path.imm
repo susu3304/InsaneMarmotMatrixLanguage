@@ -1,0 +1,15 @@
+use path
+
+marmot main {
+    let field = matrix [
+    ["S", ".", "."],
+    ["#", "#", "."],
+    [".", ".", "G"]
+    ]
+
+    let start = field.find("S")
+    let goal = field.find("G")
+    let route = path.astar(field, start, goal, cell => cell != "#")
+
+    squeak route
+}

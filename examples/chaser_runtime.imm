@@ -1,0 +1,14 @@
+use chaser
+
+marmot main {
+    let field = chaser.parse_field([
+    "....",
+    ".##.",
+    "...."
+    ])
+
+    let me = @point(1, 0)
+    let move = chaser.random_move(field, me, "#")
+
+    squeak move
+}

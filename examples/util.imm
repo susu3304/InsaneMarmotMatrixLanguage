@@ -1,0 +1,5 @@
+burrow util
+
+dig triple(x) {
+    return x * 3
+}

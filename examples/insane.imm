@@ -1,0 +1,8 @@
+insane marmot main {
+    let moves = ["UP", "DOWN", "LEFT", "RIGHT"]
+    let move = insane choose moves
+    squeak move
+
+    let values = [1, 2, 3]
+    squeak values[99]
+}

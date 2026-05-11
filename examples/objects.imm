@@ -1,0 +1,51 @@
+mask Movable {
+    dig move(dir: String) -> Void
+}
+
+den Player wear Movable {
+    fur let name: String
+    fang let hp: Int
+
+    fur dig init(name: String) {
+        self.name = name
+        self.hp = 100
+    }
+
+fur dig move(dir: String) {
+    squeak self.name + " digs " + dir
+}
+
+fur dig damage(amount: Int) {
+    self.hp = self.hp - amount
+}
+
+fur dig status() {
+    squeak self.name + ": " + str(self.hp)
+}
+}
+
+den Boss under Player {
+    fur let phase: Int
+
+    fur dig init(name: String) {
+        under.init(name)
+        self.phase = 1
+    }
+
+fur dig damage(amount: Int) {
+    under.damage(amount)
+}
+
+fur dig next_phase() {
+    self.phase = self.phase + 1
+}
+}
+
+marmot main {
+    let p: Movable = hatch Player("marmot")
+    p.move("UP")
+
+    let b: Player = hatch Boss("susu")
+    b.damage(20)
+    b.status()
+}

@@ -1,0 +1,3 @@
+marmot main {
+    squeak "Hello, insane marmot matrix!"
+}
