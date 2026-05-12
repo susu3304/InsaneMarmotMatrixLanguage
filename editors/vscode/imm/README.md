@@ -20,7 +20,18 @@ VS Code language support for IMM (`.imm`) files.
 
 ## Workspace Setup
 
-By default, the extension resolves `imm.commandPath` as `./imm` from the workspace root. In this repository that means commands work when VS Code is opened at the repo root.
+By default, `imm.commandPath` is `auto`. The extension searches for a nearby
+`imm` executable from the current `.imm` file and workspace root, then falls
+back to `imm` on `PATH`.
+
+If save-time diagnostics report that the CLI cannot be found, set an absolute
+path:
+
+```json
+{
+  "imm.commandPath": "/path/to/imm"
+}
+```
 
 To use the Rust native runtime, set:
 

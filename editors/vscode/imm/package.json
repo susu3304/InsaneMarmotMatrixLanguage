@@ -2,7 +2,7 @@
   "name": "imm-vscode",
   "displayName": "insane marmot matrix",
   "description": "VS Code language support for IMM (.imm) files.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "imm",
   "license": "UNLICENSED",
   "private": true,
@@ -91,8 +91,8 @@
       "properties": {
         "imm.commandPath": {
           "type": "string",
-          "default": "./imm",
-          "description": "Path to the IMM CLI. Relative paths are resolved from the workspace root."
+          "default": "auto",
+          "description": "Path to the IMM CLI. Use auto to search nearby workspaces and PATH. Relative paths are resolved from the workspace root."
         },
         "imm.nativeCommandPath": {
           "type": "string",

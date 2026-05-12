@@ -235,6 +235,17 @@ async function checkDocument(document, showSuccess) {
   }
 
   const result = await runCli(["check", document.fileName], document);
+  if (result.errorCode === "ENOENT") {
+    diagnostics.delete(document.uri);
+    const message = cliNotFoundMessage(result.command);
+    output.clear();
+    output.appendLine(message);
+    if (showSuccess) {
+      output.show(true);
+      vscode.window.showErrorMessage(message);
+    }
+    return;
+  }
   const problems = parseDiagnostics(result.stderr || result.stdout, document);
   diagnostics.set(document.uri, problems);
 
@@ -313,7 +324,7 @@ async function provideFormatEdits(document) {
 
 async function runWorkspaceCommand(args, title, document) {
   const workspace = getWorkspaceFolder(document);
-  const cli = resolveCli(workspace);
+  const cli = resolveCli(workspace, document);
 
   if (getConfig().get("runInTerminal")) {
     const terminal = vscode.window.createTerminal({
@@ -334,7 +345,7 @@ async function runWorkspaceCommand(args, title, document) {
 
 function runCli(args, document, workspaceOverride) {
   const workspace = workspaceOverride || getWorkspaceFolder(document);
-  const cli = resolveCli(workspace);
+  const cli = resolveCli(workspace, document);
 
   return new Promise((resolve) => {
     const child = cp.spawn(cli, args, {
@@ -352,7 +363,13 @@ function runCli(args, document, workspaceOverride) {
       stderr += chunk.toString();
     });
     child.on("error", (error) => {
-      resolve({ code: 127, stdout, stderr: `${stderr}${error.message}\n` });
+      resolve({
+        code: 127,
+        command: cli,
+        errorCode: error.code,
+        stdout,
+        stderr: `${stderr}${error.message}\n`,
+      });
     });
     child.on("close", (code) => {
       resolve({ code: code || 0, stdout, stderr });
@@ -739,27 +756,81 @@ function getWorkspaceFolder(document) {
   return vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0] : undefined;
 }
 
-function resolveCli(workspace) {
+function resolveCli(workspace, document) {
   const config = getConfig();
   const workspacePath = workspace ? workspace.uri.fsPath : process.cwd();
+  const documentDir = document && document.fileName ? path.dirname(document.fileName) : workspacePath;
 
   if (config.get("useNative")) {
     const nativePath = config.get("nativeCommandPath");
     if (nativePath) {
       return resolvePath(nativePath, workspacePath);
     }
-    for (const candidate of [
-      "native/imm-native/target/release/imm-native",
-      "native/imm-native/target/debug/imm-native",
-    ]) {
-      const resolved = resolvePath(candidate, workspacePath);
-      if (fs.existsSync(resolved)) {
-        return resolved;
+    for (const candidate of nativeCandidates(documentDir, workspacePath)) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
       }
+    }
+    return "imm-native";
+  }
+
+  const configured = config.get("commandPath") || "auto";
+  if (configured !== "auto") {
+    const resolved = resolvePath(configured, workspacePath);
+    if (isBareCommand(resolved) || fs.existsSync(resolved)) {
+      return resolved;
     }
   }
 
-  return resolvePath(config.get("commandPath") || "./imm", workspacePath);
+  for (const candidate of immCandidates(documentDir, workspacePath)) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return isBareCommand(configured) && configured !== "auto" ? configured : "imm";
+}
+
+function immCandidates(documentDir, workspacePath) {
+  return uniquePaths([
+    ...walkUpCandidates(documentDir, "imm"),
+    ...walkUpCandidates(workspacePath, "imm"),
+  ]);
+}
+
+function nativeCandidates(documentDir, workspacePath) {
+  const suffixes = [
+      "native/imm-native/target/release/imm-native",
+      "native/imm-native/target/debug/imm-native",
+    ];
+  return uniquePaths([
+    ...walkUpCandidates(documentDir, suffixes[0]),
+    ...walkUpCandidates(documentDir, suffixes[1]),
+    ...walkUpCandidates(workspacePath, suffixes[0]),
+    ...walkUpCandidates(workspacePath, suffixes[1]),
+  ]);
+}
+
+function walkUpCandidates(start, relativePath) {
+  const candidates = [];
+  let current = path.resolve(start);
+  while (true) {
+    candidates.push(path.join(current, relativePath));
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return candidates;
+}
+
+function uniquePaths(paths) {
+  return [...new Set(paths)];
+}
+
+function isBareCommand(value) {
+  return !path.isAbsolute(value) && !value.includes("/") && !value.includes("\\");
 }
 
 function resolvePath(value, workspacePath) {
@@ -782,10 +853,16 @@ function shellQuote(value) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function cliNotFoundMessage(command) {
+  return `IMM CLI not found: ${command}. Set imm.commandPath to your imm executable, or put imm on PATH.`;
+}
+
 module.exports = {
   activate,
   deactivate,
   classifySemanticTokens,
+  cliNotFoundMessage,
   parseDiagnostics,
+  resolveCli,
   scanImmTokens,
 };
