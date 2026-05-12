@@ -71,13 +71,48 @@ pub struct Point {
 
 #[derive(Clone, Debug)]
 pub struct MatrixData {
-    rows: Vec<Vec<Value>>,
+    width: usize,
+    height: usize,
+    cells: Vec<Value>,
+}
+
+impl MatrixData {
+    fn from_rows(rows: Vec<Vec<Value>>) -> Self {
+        let height = rows.len();
+        let width = rows.first().map_or(0, Vec::len);
+        let cells = rows
+            .into_iter()
+            .flat_map(|mut row| {
+                row.truncate(width);
+                row.resize(width, Value::Null);
+                row
+            })
+            .collect();
+        Self {
+            width,
+            height,
+            cells,
+        }
+    }
+
+    fn offset(&self, y: usize, x: usize) -> usize {
+        y * self.width + x
+    }
+
+    fn get(&self, y: usize, x: usize) -> &Value {
+        &self.cells[self.offset(y, x)]
+    }
+
+    fn set(&mut self, y: usize, x: usize, value: Value) {
+        let offset = self.offset(y, x);
+        self.cells[offset] = value;
+    }
 }
 
 #[derive(Clone)]
 pub struct Namespace {
     name: String,
-    values: BTreeMap<String, Value>,
+    values: HashMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -123,19 +158,19 @@ pub struct DenType {
     parent: Option<String>,
     masks: Vec<String>,
     local_fields: BTreeMap<String, FieldSpec>,
-    local_methods: BTreeMap<String, MethodSpec>,
+    local_methods: HashMap<String, MethodSpec>,
 }
 
 #[derive(Clone)]
 pub struct MaskType {
-    methods: BTreeMap<String, MaskMethod>,
+    methods: HashMap<String, MaskMethod>,
 }
 
 #[derive(Clone)]
 pub struct ObjectInstance {
     den_name: String,
-    fields: BTreeMap<String, Option<Value>>,
-    store_ids: BTreeMap<String, i64>,
+    fields: HashMap<String, Option<Value>>,
+    store_ids: HashMap<String, i64>,
 }
 
 #[derive(Clone)]
@@ -243,14 +278,14 @@ struct Cell {
 #[derive(Clone, Default)]
 struct Environment {
     parent: Option<EnvRef>,
-    values: BTreeMap<String, Cell>,
+    values: HashMap<String, Cell>,
 }
 
 impl Environment {
     fn child(parent: EnvRef) -> EnvRef {
         Rc::new(RefCell::new(Self {
             parent: Some(parent),
-            values: BTreeMap::new(),
+            values: HashMap::new(),
         }))
     }
 
@@ -581,7 +616,7 @@ impl Runtime {
                 item.name
             )));
         }
-        let mut methods = BTreeMap::new();
+        let mut methods = HashMap::new();
         for method in &item.methods {
             if methods
                 .insert(method.name.clone(), method.clone())
@@ -611,7 +646,7 @@ impl Runtime {
             )));
         }
         let mut local_fields = BTreeMap::new();
-        let mut local_methods = BTreeMap::new();
+        let mut local_methods = HashMap::new();
         for member in &item.members {
             match member {
                 DenMember::Field(field) => {
@@ -824,14 +859,22 @@ impl Runtime {
                 }
             }
             Stmt::While { condition, body } => {
+                let reusable_loop_env = if stmts_may_capture_env(body) {
+                    None
+                } else {
+                    Some(Environment::child(self.env.clone()))
+                };
                 while {
                     let condition_value = self.evaluate(condition).await?;
                     self.require_bool(&condition_value, "while condition")?
                 } {
-                    match self
-                        .execute_block(body, Environment::child(self.env.clone()))
-                        .await?
-                    {
+                    let body_env = if let Some(loop_env) = &reusable_loop_env {
+                        clear_env_values(loop_env);
+                        loop_env.clone()
+                    } else {
+                        Environment::child(self.env.clone())
+                    };
+                    match self.execute_block(body, body_env).await? {
                         Control::None => {}
                         Control::Continue => continue,
                         Control::Break => break,
@@ -847,29 +890,71 @@ impl Runtime {
                 insane,
             } => {
                 let iterable_value = self.evaluate(iterable).await?;
-                let values = self.iter_values(&iterable_value)?;
                 if *insane {
                     self.insane_depth += 1;
                 }
-                for value in values {
-                    let loop_env = Environment::child(self.env.clone());
-                    self.define_in_env(&loop_env, name.clone(), value, false, None)?;
-                    match self.execute_block(body, loop_env).await? {
-                        Control::None => {}
-                        Control::Continue => continue,
-                        Control::Break => break,
-                        control => {
-                            if *insane {
-                                self.insane_depth -= 1;
+                let reusable_loop_env = if stmts_may_capture_env(body) {
+                    None
+                } else {
+                    Some(Environment::child(self.env.clone()))
+                };
+                let result = match iterable_value {
+                    Value::Range(start, end) => {
+                        let mut result = Ok(Control::None);
+                        for value in start..end {
+                            let body_env = if let Some(loop_env) = &reusable_loop_env {
+                                reset_loop_env(loop_env, name, Value::Int(value));
+                                loop_env.clone()
+                            } else {
+                                let loop_env = Environment::child(self.env.clone());
+                                self.define_in_env(
+                                    &loop_env,
+                                    name.clone(),
+                                    Value::Int(value),
+                                    false,
+                                    None,
+                                )?;
+                                loop_env
+                            };
+                            match self.execute_block(body, body_env).await? {
+                                Control::None | Control::Continue => {}
+                                Control::Break => break,
+                                control => {
+                                    result = Ok(control);
+                                    break;
+                                }
                             }
-                            return Ok(control);
                         }
+                        result
                     }
-                }
+                    other => {
+                        let values = self.iter_values(&other)?;
+                        let mut result = Ok(Control::None);
+                        for value in values {
+                            let body_env = if let Some(loop_env) = &reusable_loop_env {
+                                reset_loop_env(loop_env, name, value);
+                                loop_env.clone()
+                            } else {
+                                let loop_env = Environment::child(self.env.clone());
+                                self.define_in_env(&loop_env, name.clone(), value, false, None)?;
+                                loop_env
+                            };
+                            match self.execute_block(body, body_env).await? {
+                                Control::None | Control::Continue => {}
+                                Control::Break => break,
+                                control => {
+                                    result = Ok(control);
+                                    break;
+                                }
+                            }
+                        }
+                        result
+                    }
+                };
                 if *insane {
                     self.insane_depth -= 1;
                 }
-                Ok(Control::None)
+                result
             }
             Stmt::Return(expr) => {
                 let value = if let Some(expr) = expr {
@@ -968,9 +1053,9 @@ impl Runtime {
                     }
                     matrix_rows.push(row);
                 }
-                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData {
-                    rows: matrix_rows,
-                }))))
+                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData::from_rows(
+                    matrix_rows,
+                )))))
             }
             Expr::Point { x, y } => {
                 let x = self.evaluate(x).await?;
@@ -1572,8 +1657,8 @@ impl Runtime {
         }
         let object = Rc::new(RefCell::new(ObjectInstance {
             den_name: name.to_string(),
-            fields: BTreeMap::new(),
-            store_ids: BTreeMap::new(),
+            fields: HashMap::new(),
+            store_ids: HashMap::new(),
         }));
         self.initialize_fields(&object).await?;
         if let Some(init) = self
@@ -2089,7 +2174,9 @@ impl Runtime {
                             .collect(),
                     );
                 }
-                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData { rows }))))
+                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData::from_rows(
+                    rows,
+                )))))
             }
             BuiltinKind::ChaserSafeMoves => {
                 require_arg_count("chaser.safe_moves", &args, 3)?;
@@ -2318,7 +2405,7 @@ impl Runtime {
                         let Value::Point(point) = point_value else {
                             unreachable!();
                         };
-                        if value_eq(&matrix.rows[point.y as usize][point.x as usize], &args[0]) {
+                        if value_eq(matrix.get(point.y as usize, point.x as usize), &args[0]) {
                             return Ok(Value::Point(point));
                         }
                     }
@@ -2336,7 +2423,7 @@ impl Runtime {
                         let Value::Point(point) = point_value else {
                             unreachable!();
                         };
-                        if value_eq(&matrix.rows[point.y as usize][point.x as usize], &args[0]) {
+                        if value_eq(matrix.get(point.y as usize, point.x as usize), &args[0]) {
                             points.push(Value::Point(point));
                         }
                     }
@@ -2575,12 +2662,20 @@ impl Runtime {
                 "items": values.borrow().iter().map(|item| self.serialize_value(item)).collect::<Result<Vec<_>, _>>()?,
             })),
             Value::Point(point) => Ok(json!({"kind": "Point", "x": point.x, "y": point.y})),
-            Value::Matrix(matrix) => Ok(json!({
-                "kind": "Matrix",
-                "rows": matrix.borrow().rows.iter().map(|row| {
-                    row.iter().map(|item| self.serialize_value(item)).collect::<Result<Vec<_>, _>>()
-                }).collect::<Result<Vec<_>, _>>()?,
-            })),
+            Value::Matrix(matrix) => {
+                let matrix = matrix.borrow();
+                let rows = (0..matrix.height)
+                    .map(|y| {
+                        (0..matrix.width)
+                            .map(|x| self.serialize_value(matrix.get(y, x)))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(json!({
+                    "kind": "Matrix",
+                    "rows": rows,
+                }))
+            }
             Value::Object(object) => Ok(json!({
                 "kind": "Object",
                 "den": object.borrow().den_name,
@@ -2609,8 +2704,8 @@ impl Runtime {
         }
         let object = Rc::new(RefCell::new(ObjectInstance {
             den_name: den_name.to_string(),
-            fields: BTreeMap::new(),
-            store_ids: BTreeMap::new(),
+            fields: HashMap::new(),
+            store_ids: HashMap::new(),
         }));
         for field in self.field_order(den_name)? {
             let Some(encoded) = fields.get(&field.name) else {
@@ -2672,7 +2767,9 @@ impl Runtime {
                             .collect::<Result<Vec<_>, _>>()
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData { rows }))))
+                Ok(Value::Matrix(Rc::new(RefCell::new(MatrixData::from_rows(
+                    rows,
+                )))))
             }
             Some("Object") => {
                 let den_name = encoded["den"].as_str().unwrap_or_default();
@@ -2812,9 +2909,14 @@ impl Runtime {
                 }
             }
             (Value::Matrix(matrix), "Matrix", [item_type]) => {
-                for (y, row) in matrix.borrow().rows.iter().enumerate() {
-                    for (x, item) in row.iter().enumerate() {
-                        self.check_type_ref(item, item_type, &format!("{label}[{y}, {x}]"))?;
+                let matrix = matrix.borrow();
+                for y in 0..matrix.height {
+                    for x in 0..matrix.width {
+                        self.check_type_ref(
+                            matrix.get(y, x),
+                            item_type,
+                            &format!("{label}[{y}, {x}]"),
+                        )?;
                     }
                 }
             }
@@ -2936,7 +3038,7 @@ impl Runtime {
             .iter()
             .filter(|(key, _)| !hidden.contains(&key.as_str()))
             .map(|(key, cell)| (key.clone(), cell.value.clone()))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let namespace = Value::Namespace(Rc::new(Namespace {
             name: name.to_string(),
             values,
@@ -3078,6 +3180,100 @@ fn should_skip_top_level_execute(item: &Item) -> bool {
             | Item::Probe { .. }
             | Item::Pack(_)
     )
+}
+
+fn clear_env_values(env: &EnvRef) {
+    env.borrow_mut().values.clear();
+}
+
+fn reset_loop_env(env: &EnvRef, name: &str, value: Value) {
+    let mut env = env.borrow_mut();
+    env.values.clear();
+    env.values.insert(
+        name.to_string(),
+        Cell {
+            value,
+            is_const: false,
+            type_name: None,
+        },
+    );
+}
+
+fn stmts_may_capture_env(statements: &[Stmt]) -> bool {
+    statements.iter().any(stmt_may_capture_env)
+}
+
+fn stmt_may_capture_env(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { expr, .. }
+        | Stmt::Expr(expr)
+        | Stmt::Panic(expr)
+        | Stmt::Expect(expr)
+        | Stmt::Return(Some(expr)) => expr_may_capture_env(expr),
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            expr_may_capture_env(condition)
+                || stmts_may_capture_env(then_body)
+                || else_body.as_ref().is_some_and(|else_body| match else_body {
+                    ElseBody::If(stmt) => stmt_may_capture_env(stmt),
+                    ElseBody::Block(body) => stmts_may_capture_env(body),
+                })
+        }
+        Stmt::For { iterable, body, .. } => {
+            expr_may_capture_env(iterable) || stmts_may_capture_env(body)
+        }
+        Stmt::While { condition, body } => {
+            expr_may_capture_env(condition) || stmts_may_capture_env(body)
+        }
+        Stmt::Squeak(exprs) | Stmt::Trace(exprs) => exprs.iter().any(expr_may_capture_env),
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            stmts_may_capture_env(body)
+                || catch_body
+                    .as_ref()
+                    .is_some_and(|body| stmts_may_capture_env(body))
+        }
+        Stmt::InsaneBlock(body) => stmts_may_capture_env(body),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
+    }
+}
+
+fn expr_may_capture_env(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lambda { .. } | Expr::Scatter { .. } => true,
+        Expr::Assign { target, value } => {
+            expr_may_capture_env(target) || expr_may_capture_env(value)
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_may_capture_env(left) || expr_may_capture_env(right)
+        }
+        Expr::Unary { expr, .. } | Expr::InsaneChoose(expr) | Expr::Wait(expr) => {
+            expr_may_capture_env(expr)
+        }
+        Expr::Array(items) | Expr::Matrix(items) | Expr::Nest(items) => {
+            items.iter().any(expr_may_capture_env)
+        }
+        Expr::Map(pairs) => pairs
+            .iter()
+            .any(|(key, value)| expr_may_capture_env(key) || expr_may_capture_env(value)),
+        Expr::Point { x, y } | Expr::Range { start: x, end: y } => {
+            expr_may_capture_env(x) || expr_may_capture_env(y)
+        }
+        Expr::Hatch { args, .. } => args.iter().any(expr_may_capture_env),
+        Expr::Call { callee, args } => {
+            expr_may_capture_env(callee) || args.iter().any(expr_may_capture_env)
+        }
+        Expr::Index { target, args } => {
+            expr_may_capture_env(target) || args.iter().any(expr_may_capture_env)
+        }
+        Expr::Member { target, .. } => expr_may_capture_env(target),
+        Expr::Tunnel { left, right } => expr_may_capture_env(left) || expr_may_capture_env(right),
+        Expr::Literal(_) | Expr::Var(_) | Expr::Sniff => false,
+    }
 }
 
 async fn wait_task(task: TaskRef) -> Result<Value, Diagnostic> {
@@ -3248,7 +3444,7 @@ fn two_int_args(args: &[Value], message: &str) -> Result<(i64, i64), Diagnostic>
 
 fn matrix_get(matrix: &MatrixData, args: &[Value], unsafe_mode: bool) -> Result<Value, Diagnostic> {
     let (y, x) = matrix_coords(args)?;
-    if y < 0 || x < 0 || y as usize >= matrix.rows.len() || x as usize >= matrix_width(matrix) {
+    if y < 0 || x < 0 || y as usize >= matrix.height || x as usize >= matrix.width {
         if unsafe_mode {
             return Ok(Value::Null);
         }
@@ -3256,7 +3452,7 @@ fn matrix_get(matrix: &MatrixData, args: &[Value], unsafe_mode: bool) -> Result<
             "matrix index out of bounds: [{y}, {x}]"
         )));
     }
-    Ok(matrix.rows[y as usize][x as usize].clone())
+    Ok(matrix.get(y as usize, x as usize).clone())
 }
 
 fn matrix_set(
@@ -3266,7 +3462,7 @@ fn matrix_set(
     unsafe_mode: bool,
 ) -> Result<(), Diagnostic> {
     let (y, x) = matrix_coords(args)?;
-    if y < 0 || x < 0 || y as usize >= matrix.rows.len() || x as usize >= matrix_width(matrix) {
+    if y < 0 || x < 0 || y as usize >= matrix.height || x as usize >= matrix.width {
         if unsafe_mode {
             return Ok(());
         }
@@ -3274,7 +3470,7 @@ fn matrix_set(
             "matrix index out of bounds: [{y}, {x}]"
         )));
     }
-    matrix.rows[y as usize][x as usize] = value;
+    matrix.set(y as usize, x as usize, value);
     Ok(())
 }
 
@@ -3292,11 +3488,11 @@ fn matrix_coords(args: &[Value]) -> Result<(i64, i64), Diagnostic> {
 }
 
 fn matrix_width(matrix: &MatrixData) -> usize {
-    matrix.rows.first().map_or(0, Vec::len)
+    matrix.width
 }
 
 fn matrix_height(matrix: &MatrixData) -> usize {
-    matrix.rows.len()
+    matrix.height
 }
 
 fn matrix_points(matrix: &MatrixData) -> Vec<Value> {
@@ -3900,17 +4096,22 @@ pub fn format_value(value: &Value) -> String {
                     .join(", ")
             )
         }
-        Value::Matrix(matrix) => format!(
-            "matrix {}",
-            format_value(&Value::Array(Rc::new(RefCell::new(
-                matrix
-                    .borrow()
-                    .rows
-                    .iter()
-                    .map(|row| Value::Array(Rc::new(RefCell::new(row.clone()))))
-                    .collect()
-            ))))
-        ),
+        Value::Matrix(matrix) => {
+            let matrix = matrix.borrow();
+            let rows = (0..matrix.height)
+                .map(|y| {
+                    Value::Array(Rc::new(RefCell::new(
+                        (0..matrix.width)
+                            .map(|x| matrix.get(y, x).clone())
+                            .collect(),
+                    )))
+                })
+                .collect();
+            format!(
+                "matrix {}",
+                format_value(&Value::Array(Rc::new(RefCell::new(rows))))
+            )
+        }
         Value::Point(point) => format!("({},{})", point.x, point.y),
         Value::Range(start, end) => format!("{start}..{end}"),
         Value::Function(function) => format!("<dig {}>", function.name),

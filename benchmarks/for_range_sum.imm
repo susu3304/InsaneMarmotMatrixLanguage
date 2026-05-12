@@ -1,0 +1,7 @@
+marmot main {
+    let sum = 0
+    for i in 0..1000000 {
+        sum = sum + i
+    }
+    squeak sum
+}

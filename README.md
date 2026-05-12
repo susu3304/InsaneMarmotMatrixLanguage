@@ -111,6 +111,12 @@ cargo test
 cargo run -- law
 ```
 
+性能確認用の小さいベンチは `benchmarks/` にあります。
+
+```bash
+benchmarks/run.sh
+```
+
 ## VS Code
 
 VS Code 拡張機能は `editors/vscode/imm` にあります。
