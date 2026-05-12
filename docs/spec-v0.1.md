@@ -4,13 +4,13 @@
 
 ## 基本
 
-- 実行コマンド: `imm run main.imm`
-- trace 付き実行: `imm run main.imm --trace`
-- 構文チェック: `imm check main.imm`
-- フォーマット: `imm fmt main.imm`
-- テスト: `imm probe` / `imm law`
-- パッケージ: `imm pack main.imm --pelt python`
-- 機械可読メタデータ: `imm spec --json`
+- 実行コマンド: `imm-native run main.imm`
+- trace 付き実行: `imm-native run main.imm --trace`
+- 構文チェック: `imm-native check main.imm`
+- フォーマット: `imm-native fmt main.imm`
+- テスト: `imm-native probe` / `imm-native law`
+- パッケージ: `imm-native pack main.imm --pelt native`
+- 機械可読メタデータ: `imm-native spec --json`
 - エントリーポイント: `marmot main`
 - async エントリーポイント: `howl marmot main`
 - 狂気エントリーポイント: `insane marmot main`
@@ -170,15 +170,14 @@ probe "add" {
 
 ## pack
 
-`pack` ブロックまたは `imm pack` で Python pelt の zipapp artifact、
-または native pelt の Python-free Rust 実行 artifact を作成できる。
+`pack` ブロックまたは `imm-native pack` で native pelt の Rust 実行 artifact を作成できる。
 
 ```imm
 pack {
     entry "examples/hello.imm"
-    crate "dist/hello.pyz"
-    pelt "python"
+    crate "dist/hello-native"
+    pelt "native"
 }
 ```
 
-`--pelt native` は Rust `imm-native` の law suite ゲートを通る Python-free evaluator として有効。
+`--pelt native` は Rust `imm-native` の law suite ゲートを通る evaluator として有効。

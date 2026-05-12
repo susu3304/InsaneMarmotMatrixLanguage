@@ -1,15 +1,23 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as JsonValue};
+use tokio::runtime::Builder as TokioRuntimeBuilder;
+use tokio::task::{JoinHandle, LocalSet};
+use tokio::time::sleep;
 
 use crate::ast::*;
+use crate::checker;
 use crate::diagnostics::{Category, Diagnostic};
 use crate::parser::parse_source;
+
+mod task;
+use task::TaskState;
 
 type EnvRef = Rc<RefCell<Environment>>;
 type ObjRef = Rc<RefCell<ObjectInstance>>;
@@ -145,9 +153,10 @@ pub struct Response {
     ok: bool,
 }
 
-#[derive(Clone)]
 pub struct TaskData {
-    value: Value,
+    state: TaskState,
+    handle: Option<JoinHandle<Result<Value, Diagnostic>>>,
+    result: Option<Result<Value, Diagnostic>>,
 }
 
 #[derive(Clone)]
@@ -263,6 +272,15 @@ impl Environment {
     }
 }
 
+fn block_on_local<T>(future: impl Future<Output = T>) -> T {
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create IMM async runtime");
+    let local = LocalSet::new();
+    local.block_on(&runtime, future)
+}
+
 #[derive(Clone, Debug)]
 enum Control {
     None,
@@ -326,24 +344,58 @@ impl Runtime {
         self.trace.borrow().clone()
     }
 
+    fn fork_for_task(&self) -> Self {
+        Self {
+            source_path: self.source_path.clone(),
+            env: self.env.clone(),
+            module_cache: self.module_cache.clone(),
+            module_stack: self.module_stack.clone(),
+            output: self.output.clone(),
+            trace: self.trace.clone(),
+            trace_enabled: self.trace_enabled,
+            dens: self.dens.clone(),
+            masks: self.masks.clone(),
+            current_den: self.current_den.clone(),
+            insane_depth: self.insane_depth,
+            howl_depth: self.howl_depth,
+            embedded_sources: self.embedded_sources.clone(),
+        }
+    }
+
+    fn spawn_task(
+        &self,
+        future: impl Future<Output = Result<Value, Diagnostic>> + 'static,
+    ) -> Value {
+        Value::Task(Rc::new(RefCell::new(TaskData {
+            state: TaskState::Pending,
+            handle: Some(tokio::task::spawn_local(future)),
+            result: None,
+        })))
+    }
+
     pub fn load_program(&self, path: &Path) -> Result<Program, Diagnostic> {
         let source = fs::read_to_string(path).map_err(io_error)?;
         parse_source(0, &source)
     }
 
     pub fn check(&mut self, program: &Program) -> Result<(), Diagnostic> {
-        self.prepare(program)?;
-        self.static_check(program)
+        block_on_local(self.prepare(program))?;
+        checker::check_program(program)
     }
 
     pub fn run(&mut self, program: &Program, run_main: bool) -> Result<(), Diagnostic> {
-        let main = self.prepare(program)?;
+        block_on_local(self.run_async(program, run_main))
+    }
+
+    #[async_recursion::async_recursion(?Send)]
+    async fn run_async(&mut self, program: &Program, run_main: bool) -> Result<(), Diagnostic> {
+        let main = self.prepare(program).await?;
         for item in &program.items {
             if should_skip_top_level_execute(item) {
                 continue;
             }
             if let Item::Stmt(stmt) = item {
-                match self.execute(stmt)? {
+                match self.execute(stmt).await? {
                     Control::None => {}
                     Control::Return(_) => return Err(runtime_error("return outside function")),
                     Control::Break | Control::Continue => {
@@ -361,7 +413,9 @@ impl Runtime {
                     if insane {
                         self.insane_depth += 1;
                     }
-                    let result = self.execute_block(&body, Environment::child(self.env.clone()));
+                    let result = self
+                        .execute_block(&body, Environment::child(self.env.clone()))
+                        .await;
                     if insane {
                         self.insane_depth -= 1;
                     }
@@ -378,7 +432,9 @@ impl Runtime {
                         self.insane_depth += 1;
                     }
                     self.howl_depth += 1;
-                    let result = self.execute_block(&body, Environment::child(self.env.clone()));
+                    let result = self
+                        .execute_block(&body, Environment::child(self.env.clone()))
+                        .await;
                     self.howl_depth -= 1;
                     if insane {
                         self.insane_depth -= 1;
@@ -394,20 +450,31 @@ impl Runtime {
         &mut self,
         program: &Program,
     ) -> Result<Vec<(String, bool, Option<String>)>, Diagnostic> {
-        self.prepare(program)?;
+        block_on_local(self.run_probe_blocks_async(program))
+    }
+
+    #[async_recursion::async_recursion(?Send)]
+    async fn run_probe_blocks_async(
+        &mut self,
+        program: &Program,
+    ) -> Result<Vec<(String, bool, Option<String>)>, Diagnostic> {
+        self.prepare(program).await?;
         for item in &program.items {
             if should_skip_top_level_execute(item) {
                 continue;
             }
             if let Item::Stmt(stmt) = item {
-                self.execute(stmt)?;
+                self.execute(stmt).await?;
             }
         }
 
         let mut results = Vec::new();
         for item in &program.items {
             if let Item::Probe { name, body } = item {
-                match self.execute_block(body, Environment::child(self.env.clone())) {
+                match self
+                    .execute_block(body, Environment::child(self.env.clone()))
+                    .await
+                {
                     Ok(Control::None) => results.push((name.clone(), true, None)),
                     Ok(_) => results.push((
                         name.clone(),
@@ -421,12 +488,13 @@ impl Runtime {
         Ok(results)
     }
 
-    fn prepare(&mut self, program: &Program) -> Result<Option<PreparedMain>, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn prepare(&mut self, program: &Program) -> Result<Option<PreparedMain>, Diagnostic> {
         let mut main = None;
         let mut howl_main = None;
         for item in &program.items {
             if let Item::Use(name) = item {
-                let namespace = self.load_namespace(name)?;
+                let namespace = self.load_namespace(name).await?;
                 self.env
                     .borrow_mut()
                     .define_unchecked(name.clone(), namespace, true, None);
@@ -656,23 +724,34 @@ impl Runtime {
         Ok(())
     }
 
-    fn execute_block(&mut self, statements: &[Stmt], env: EnvRef) -> Result<Control, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn execute_block(
+        &mut self,
+        statements: &[Stmt],
+        env: EnvRef,
+    ) -> Result<Control, Diagnostic> {
         let previous = self.env.clone();
         self.env = env;
-        let result = (|| {
-            for stmt in statements {
-                match self.execute(stmt)? {
-                    Control::None => {}
-                    control => return Ok(control),
+        let mut result = Ok(Control::None);
+        for stmt in statements {
+            match self.execute(stmt).await {
+                Ok(Control::None) => {}
+                Ok(control) => {
+                    result = Ok(control);
+                    break;
+                }
+                Err(err) => {
+                    result = Err(err);
+                    break;
                 }
             }
-            Ok(Control::None)
-        })();
+        }
         self.env = previous;
         result
     }
 
-    fn execute(&mut self, stmt: &Stmt) -> Result<Control, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn execute(&mut self, stmt: &Stmt) -> Result<Control, Diagnostic> {
         match stmt {
             Stmt::Let {
                 name,
@@ -680,25 +759,28 @@ impl Runtime {
                 type_name,
                 is_const,
             } => {
-                let value = self.evaluate(expr)?;
+                let value = self.evaluate(expr).await?;
                 self.define_current(name.clone(), value, *is_const, type_name.clone())?;
                 Ok(Control::None)
             }
             Stmt::Expr(expr) => {
-                self.evaluate(expr)?;
+                self.evaluate(expr).await?;
                 Ok(Control::None)
             }
             Stmt::Squeak(exprs) => {
-                let values = exprs
-                    .iter()
-                    .map(|expr| self.evaluate(expr).map(|value| format_value(&value)))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut values = Vec::new();
+                for expr in exprs {
+                    values.push(format_value(&self.evaluate(expr).await?));
+                }
                 self.output.borrow_mut().push(values.join(" "));
                 Ok(Control::None)
             }
-            Stmt::Panic(expr) => Err(runtime_error(format_value(&self.evaluate(expr)?))),
+            Stmt::Panic(expr) => {
+                let value = self.evaluate(expr).await?;
+                Err(runtime_error(format_value(&value)))
+            }
             Stmt::Expect(expr) => {
-                let value = self.evaluate(expr)?;
+                let value = self.evaluate(expr).await?;
                 match value {
                     Value::Bool(true) => Ok(Control::None),
                     Value::Bool(false) => Err(runtime_error("expect failed")),
@@ -707,10 +789,10 @@ impl Runtime {
             }
             Stmt::Trace(exprs) => {
                 if self.trace_enabled {
-                    let values = exprs
-                        .iter()
-                        .map(|expr| self.evaluate(expr).map(|value| format_value(&value)))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut values = Vec::new();
+                    for expr in exprs {
+                        values.push(format_value(&self.evaluate(expr).await?));
+                    }
                     let payload = values.join(" ");
                     self.trace.borrow_mut().push(if payload.is_empty() {
                         "[trace]".to_string()
@@ -725,14 +807,16 @@ impl Runtime {
                 then_body,
                 else_body,
             } => {
-                let condition_value = self.evaluate(condition)?;
+                let condition_value = self.evaluate(condition).await?;
                 if self.require_bool(&condition_value, "if condition")? {
                     self.execute_block(then_body, Environment::child(self.env.clone()))
+                        .await
                 } else if let Some(else_body) = else_body {
                     match else_body {
-                        ElseBody::If(stmt) => self.execute(stmt),
+                        ElseBody::If(stmt) => self.execute(stmt).await,
                         ElseBody::Block(body) => {
                             self.execute_block(body, Environment::child(self.env.clone()))
+                                .await
                         }
                     }
                 } else {
@@ -741,10 +825,13 @@ impl Runtime {
             }
             Stmt::While { condition, body } => {
                 while {
-                    let condition_value = self.evaluate(condition)?;
+                    let condition_value = self.evaluate(condition).await?;
                     self.require_bool(&condition_value, "while condition")?
                 } {
-                    match self.execute_block(body, Environment::child(self.env.clone()))? {
+                    match self
+                        .execute_block(body, Environment::child(self.env.clone()))
+                        .await?
+                    {
                         Control::None => {}
                         Control::Continue => continue,
                         Control::Break => break,
@@ -759,7 +846,7 @@ impl Runtime {
                 body,
                 insane,
             } => {
-                let iterable_value = self.evaluate(iterable)?;
+                let iterable_value = self.evaluate(iterable).await?;
                 let values = self.iter_values(&iterable_value)?;
                 if *insane {
                     self.insane_depth += 1;
@@ -767,7 +854,7 @@ impl Runtime {
                 for value in values {
                     let loop_env = Environment::child(self.env.clone());
                     self.define_in_env(&loop_env, name.clone(), value, false, None)?;
-                    match self.execute_block(body, loop_env)? {
+                    match self.execute_block(body, loop_env).await? {
                         Control::None => {}
                         Control::Continue => continue,
                         Control::Break => break,
@@ -786,7 +873,7 @@ impl Runtime {
             }
             Stmt::Return(expr) => {
                 let value = if let Some(expr) = expr {
-                    self.evaluate(expr)?
+                    self.evaluate(expr).await?
                 } else {
                     Value::Null
                 };
@@ -799,7 +886,10 @@ impl Runtime {
                 catch_name,
                 catch_body,
                 insane,
-            } => match self.execute_block(body, Environment::child(self.env.clone())) {
+            } => match self
+                .execute_block(body, Environment::child(self.env.clone()))
+                .await
+            {
                 Ok(control) => Ok(control),
                 Err(err) => {
                     if *insane && catch_body.is_none() {
@@ -816,19 +906,22 @@ impl Runtime {
                         false,
                         None,
                     )?;
-                    self.execute_block(catch_body, catch_env)
+                    self.execute_block(catch_body, catch_env).await
                 }
             },
             Stmt::InsaneBlock(body) => {
                 self.insane_depth += 1;
-                let result = self.execute_block(body, Environment::child(self.env.clone()));
+                let result = self
+                    .execute_block(body, Environment::child(self.env.clone()))
+                    .await;
                 self.insane_depth -= 1;
                 result
             }
         }
     }
 
-    fn evaluate(&mut self, expr: &Expr) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn evaluate(&mut self, expr: &Expr) -> Result<Value, Diagnostic> {
         match expr {
             Expr::Literal(literal) => Ok(match literal {
                 Literal::Null => Value::Null,
@@ -839,20 +932,20 @@ impl Runtime {
             }),
             Expr::Var(name) => self.get_var(name),
             Expr::Array(items) => {
-                let values = items
-                    .iter()
-                    .map(|item| self.evaluate(item))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut values = Vec::new();
+                for item in items {
+                    values.push(self.evaluate(item).await?);
+                }
                 Ok(Value::Array(Rc::new(RefCell::new(values))))
             }
             Expr::Map(pairs) => {
                 let mut values = BTreeMap::new();
                 for (key_expr, value_expr) in pairs {
-                    let key = self.evaluate(key_expr)?;
+                    let key = self.evaluate(key_expr).await?;
                     let Value::String(key) = key else {
                         return Err(runtime_error("map literal keys must be String"));
                     };
-                    let value = self.evaluate(value_expr)?;
+                    let value = self.evaluate(value_expr).await?;
                     values.insert(key, value);
                 }
                 Ok(Value::Map(Rc::new(RefCell::new(values))))
@@ -861,7 +954,7 @@ impl Runtime {
                 let mut matrix_rows = Vec::new();
                 let mut width = None;
                 for row_expr in rows {
-                    let row_value = self.evaluate(row_expr)?;
+                    let row_value = self.evaluate(row_expr).await?;
                     let Value::Array(row) = row_value else {
                         return Err(runtime_error("matrix row must be an array"));
                     };
@@ -880,20 +973,20 @@ impl Runtime {
                 }))))
             }
             Expr::Point { x, y } => {
-                let x = self.evaluate(x)?;
-                let y = self.evaluate(y)?;
+                let x = self.evaluate(x).await?;
+                let y = self.evaluate(y).await?;
                 let (Value::Int(x), Value::Int(y)) = (x, y) else {
                     return Err(runtime_error("@point requires Int x and y"));
                 };
                 Ok(Value::Point(Point { x, y }))
             }
             Expr::Hatch { name, args } => {
-                let args = self.eval_args(args)?;
-                self.hatch(name, args)
+                let args = self.eval_args(args).await?;
+                self.hatch(name, args).await
             }
             Expr::Sniff => Ok(Value::String(String::new())),
             Expr::Unary { op, expr } => {
-                let value = self.evaluate(expr)?;
+                let value = self.evaluate(expr).await?;
                 match op.as_str() {
                     "-" => match value {
                         Value::Int(value) => Ok(Value::Int(-value)),
@@ -904,32 +997,32 @@ impl Runtime {
                     _ => Err(runtime_error(format!("unknown unary operator {op}"))),
                 }
             }
-            Expr::Binary { left, op, right } => self.binary(left, op, right),
+            Expr::Binary { left, op, right } => self.binary(left, op, right).await,
             Expr::Range { start, end } => {
-                let start = self.evaluate(start)?;
-                let end = self.evaluate(end)?;
+                let start = self.evaluate(start).await?;
+                let end = self.evaluate(end).await?;
                 let (Value::Int(start), Value::Int(end)) = (start, end) else {
                     return Err(runtime_error("range bounds must be Int"));
                 };
                 Ok(Value::Range(start, end))
             }
             Expr::Call { callee, args } => {
-                let callee = self.evaluate(callee)?;
-                let args = self.eval_args(args)?;
-                self.call_value(callee, args)
+                let callee = self.evaluate(callee).await?;
+                let args = self.eval_args(args).await?;
+                self.call_value(callee, args).await
             }
             Expr::Index { target, args } => {
-                let target = self.evaluate(target)?;
-                let args = self.eval_args(args)?;
+                let target = self.evaluate(target).await?;
+                let args = self.eval_args(args).await?;
                 self.get_index(&target, &args)
             }
             Expr::Member { target, name } => {
-                let target = self.evaluate(target)?;
+                let target = self.evaluate(target).await?;
                 self.get_member(&target, name)
             }
             Expr::Assign { target, value } => {
-                let value = self.evaluate(value)?;
-                self.assign_target(target, value)
+                let value = self.evaluate(value).await?;
+                self.assign_target(target, value).await
             }
             Expr::Lambda { params, body } => Ok(Value::Lambda(Rc::new(LambdaFunction {
                 params: params.clone(),
@@ -937,11 +1030,11 @@ impl Runtime {
                 closure: self.env.clone(),
             }))),
             Expr::Tunnel { left, right } => {
-                let value = self.evaluate(left)?;
-                self.eval_tunnel(value, right)
+                let value = self.evaluate(left).await?;
+                self.eval_tunnel(value, right).await
             }
             Expr::InsaneChoose(expr) => {
-                let values = self.evaluate(expr)?;
+                let values = self.evaluate(expr).await?;
                 let mut values = self.iter_values(&values)?;
                 if values.is_empty() {
                     Ok(Value::Null)
@@ -953,8 +1046,8 @@ impl Runtime {
                 if self.howl_depth == 0 {
                     return Err(runtime_error("wait can only be used inside howl context"));
                 }
-                let value = self.evaluate(expr)?;
-                self.wait_value(value)
+                let value = self.evaluate(expr).await?;
+                self.wait_value(value).await
             }
             Expr::Scatter { expr, insane } => {
                 if self.howl_depth == 0 {
@@ -962,40 +1055,45 @@ impl Runtime {
                         "scatter can only be used inside howl context",
                     ));
                 }
+                let expr = expr.as_ref().clone();
+                let mut runtime = self.fork_for_task();
                 if *insane {
-                    self.insane_depth += 1;
+                    runtime.insane_depth += 1;
                 }
-                let value = self.evaluate(expr)?;
-                if *insane {
-                    self.insane_depth -= 1;
-                }
-                Ok(Value::Task(Rc::new(RefCell::new(TaskData { value }))))
+                Ok(self.spawn_task(async move { runtime.evaluate(&expr).await }))
             }
             Expr::Nest(items) => {
                 if self.howl_depth == 0 {
                     return Err(runtime_error("nest can only be used inside howl context"));
                 }
-                let tasks = items
-                    .iter()
-                    .map(|item| self.evaluate(item))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut tasks = Vec::new();
+                for item in items {
+                    tasks.push(self.evaluate(item).await?);
+                }
                 Ok(Value::TaskGroup(tasks))
             }
         }
     }
 
-    fn eval_args(&mut self, args: &[Expr]) -> Result<Vec<Value>, Diagnostic> {
-        args.iter().map(|arg| self.evaluate(arg)).collect()
+    #[async_recursion::async_recursion(?Send)]
+    async fn eval_args(&mut self, args: &[Expr]) -> Result<Vec<Value>, Diagnostic> {
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.evaluate(arg).await?);
+        }
+        Ok(values)
     }
 
-    fn call_value(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_value(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, Diagnostic> {
         match callee {
-            Value::Function(function) => self.call_user_function(&function, args),
-            Value::Lambda(lambda) => self.call_lambda(&lambda, args),
-            Value::Builtin(kind) => self.call_builtin(kind, args),
+            Value::Function(function) => self.call_user_function(&function, args).await,
+            Value::Lambda(lambda) => self.call_lambda(&lambda, args).await,
+            Value::Builtin(kind) => self.call_builtin(kind, args).await,
             Value::NativeMethod(method) => self.call_native_method(&method, args),
             Value::ObjectMethod(method) => {
                 self.call_object_method(&method.object, &method.method, args)
+                    .await
             }
             _ => Err(runtime_error(format!(
                 "{} is not callable",
@@ -1004,7 +1102,8 @@ impl Runtime {
         }
     }
 
-    fn call_user_function(
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_user_function(
         &mut self,
         function: &UserFunction,
         args: Vec<Value>,
@@ -1018,18 +1117,18 @@ impl Runtime {
             )));
         }
         if function.howl {
-            let previous_howl = self.howl_depth;
-            self.howl_depth += 1;
-            let result = self.call_user_function_body(function, args);
-            self.howl_depth = previous_howl;
-            return Ok(Value::Task(Rc::new(RefCell::new(TaskData {
-                value: result?,
-            }))));
+            let function = function.clone();
+            let mut runtime = self.fork_for_task();
+            return Ok(self.spawn_task(async move {
+                runtime.howl_depth += 1;
+                runtime.call_user_function_body(&function, args).await
+            }));
         }
-        self.call_user_function_body(function, args)
+        self.call_user_function_body(function, args).await
     }
 
-    fn call_user_function_body(
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_user_function_body(
         &mut self,
         function: &UserFunction,
         args: Vec<Value>,
@@ -1047,7 +1146,7 @@ impl Runtime {
                 param.type_name.clone(),
             )?;
         }
-        match self.execute_block(&function.body, env)? {
+        match self.execute_block(&function.body, env).await? {
             Control::Return(value) => {
                 if let Some(type_name) = &function.return_type {
                     self.check_type(
@@ -1073,7 +1172,8 @@ impl Runtime {
         }
     }
 
-    fn call_lambda(
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_lambda(
         &mut self,
         lambda: &LambdaFunction,
         args: Vec<Value>,
@@ -1093,11 +1193,11 @@ impl Runtime {
             LambdaBody::Expr(expr) => {
                 let previous = self.env.clone();
                 self.env = env;
-                let result = self.evaluate(expr);
+                let result = self.evaluate(expr).await;
                 self.env = previous;
                 result
             }
-            LambdaBody::Block(body) => match self.execute_block(body, env)? {
+            LambdaBody::Block(body) => match self.execute_block(body, env).await? {
                 Control::Return(value) => Ok(value),
                 Control::None => Ok(Value::Null),
                 _ => Err(runtime_error("loop control outside loop")),
@@ -1105,37 +1205,39 @@ impl Runtime {
         }
     }
 
-    fn eval_tunnel(&mut self, value: Value, right: &Expr) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn eval_tunnel(&mut self, value: Value, right: &Expr) -> Result<Value, Diagnostic> {
         if let Expr::Call { callee, args } = right {
-            let callee = self.evaluate(callee)?;
+            let callee = self.evaluate(callee).await?;
             let mut all_args = vec![value];
-            all_args.extend(self.eval_args(args)?);
-            self.call_value(callee, all_args)
+            all_args.extend(self.eval_args(args).await?);
+            self.call_value(callee, all_args).await
         } else {
-            let callee = self.evaluate(right)?;
-            self.call_value(callee, vec![value])
+            let callee = self.evaluate(right).await?;
+            self.call_value(callee, vec![value]).await
         }
     }
 
-    fn binary(&mut self, left: &Expr, op: &str, right: &Expr) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn binary(&mut self, left: &Expr, op: &str, right: &Expr) -> Result<Value, Diagnostic> {
         if op == "&&" {
-            let left = self.evaluate(left)?;
+            let left = self.evaluate(left).await?;
             if !self.require_bool(&left, "left side of &&")? {
                 return Ok(Value::Bool(false));
             }
-            let right = self.evaluate(right)?;
+            let right = self.evaluate(right).await?;
             return Ok(Value::Bool(self.require_bool(&right, "right side of &&")?));
         }
         if op == "||" {
-            let left = self.evaluate(left)?;
+            let left = self.evaluate(left).await?;
             if self.require_bool(&left, "left side of ||")? {
                 return Ok(Value::Bool(true));
             }
-            let right = self.evaluate(right)?;
+            let right = self.evaluate(right).await?;
             return Ok(Value::Bool(self.require_bool(&right, "right side of ||")?));
         }
-        let left = self.evaluate(left)?;
-        let right = self.evaluate(right)?;
+        let left = self.evaluate(left).await?;
+        let right = self.evaluate(right).await?;
         self.apply_binary(op, &left, &right)
     }
 
@@ -1174,20 +1276,21 @@ impl Runtime {
         }
     }
 
-    fn assign_target(&mut self, target: &Expr, value: Value) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn assign_target(&mut self, target: &Expr, value: Value) -> Result<Value, Diagnostic> {
         match target {
             Expr::Var(name) => {
                 self.assign_var(name, value.clone())?;
                 Ok(value)
             }
             Expr::Index { target, args } => {
-                let object = self.evaluate(target)?;
-                let args = self.eval_args(args)?;
+                let object = self.evaluate(target).await?;
+                let args = self.eval_args(args).await?;
                 self.set_index(&object, &args, value.clone())?;
                 Ok(value)
             }
             Expr::Member { target, name } => {
-                let object = self.evaluate(target)?;
+                let object = self.evaluate(target).await?;
                 self.set_member(&object, name, value.clone())?;
                 Ok(value)
             }
@@ -1462,7 +1565,8 @@ impl Runtime {
         })))
     }
 
-    fn hatch(&mut self, name: &str, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn hatch(&mut self, name: &str, args: Vec<Value>) -> Result<Value, Diagnostic> {
         if !self.dens.contains_key(name) {
             return Err(runtime_error(format!("den {name} is not defined")));
         }
@@ -1471,14 +1575,14 @@ impl Runtime {
             fields: BTreeMap::new(),
             store_ids: BTreeMap::new(),
         }));
-        self.initialize_fields(&object)?;
+        self.initialize_fields(&object).await?;
         if let Some(init) = self
             .dens
             .get(name)
             .and_then(|den| den.local_methods.get("init"))
             .cloned()
         {
-            self.call_object_method(&object, &init, args)?;
+            self.call_object_method(&object, &init, args).await?;
         } else if !args.is_empty() {
             return Err(runtime_error(format!(
                 "{name} has no init and expects 0 arguments"
@@ -1488,7 +1592,8 @@ impl Runtime {
         Ok(Value::Object(object))
     }
 
-    fn initialize_fields(&mut self, object: &ObjRef) -> Result<(), Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn initialize_fields(&mut self, object: &ObjRef) -> Result<(), Diagnostic> {
         let den_name = object.borrow().den_name.clone();
         for field in self.field_order(&den_name)? {
             object.borrow_mut().fields.insert(field.name.clone(), None);
@@ -1504,7 +1609,7 @@ impl Runtime {
                 let previous = self.env.clone();
                 self.env = env;
                 self.current_den.push(field.owner.clone());
-                let value = self.evaluate(expr);
+                let value = self.evaluate(expr).await;
                 self.current_den.pop();
                 self.env = previous;
                 let value = value?;
@@ -1542,7 +1647,8 @@ impl Runtime {
         Ok(())
     }
 
-    fn call_object_method(
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_object_method(
         &mut self,
         object: &ObjRef,
         method: &MethodSpec,
@@ -1594,7 +1700,7 @@ impl Runtime {
             )?;
         }
         self.current_den.push(method.owner.clone());
-        let result = self.execute_block(&method.body, env);
+        let result = self.execute_block(&method.body, env).await;
         self.current_den.pop();
         match result? {
             Control::Return(value) => {
@@ -1678,12 +1784,13 @@ impl Runtime {
         Ok(fields)
     }
 
-    fn wait_value(&mut self, value: Value) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn wait_value(&mut self, value: Value) -> Result<Value, Diagnostic> {
         match value {
             Value::Task(task) => {
-                let value = task.borrow().value.clone();
+                let value = wait_task(task).await?;
                 if matches!(value, Value::Task(_) | Value::TaskGroup(_)) {
-                    self.wait_value(value)
+                    self.wait_value(value).await
                 } else {
                     Ok(value)
                 }
@@ -1691,7 +1798,7 @@ impl Runtime {
             Value::TaskGroup(values) => {
                 let mut results = Vec::new();
                 for value in values {
-                    results.push(self.wait_value(value)?);
+                    results.push(self.wait_value(value).await?);
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(results))))
             }
@@ -1807,7 +1914,12 @@ impl Runtime {
         }
     }
 
-    fn call_builtin(&mut self, kind: BuiltinKind, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_builtin(
+        &mut self,
+        kind: BuiltinKind,
+        args: Vec<Value>,
+    ) -> Result<Value, Diagnostic> {
         match kind {
             BuiltinKind::Len => {
                 require_arg_count("len", &args, 1)?;
@@ -1852,10 +1964,10 @@ impl Runtime {
             BuiltinKind::Map => {
                 require_arg_count("map", &args, 2)?;
                 let values = self.iter_values(&args[0])?;
-                let mapped = values
-                    .into_iter()
-                    .map(|value| self.call_value(args[1].clone(), vec![value]))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut mapped = Vec::new();
+                for value in values {
+                    mapped.push(self.call_value(args[1].clone(), vec![value]).await?);
+                }
                 Ok(Value::Array(Rc::new(RefCell::new(mapped))))
             }
             BuiltinKind::Filter => {
@@ -1863,7 +1975,9 @@ impl Runtime {
                 let values = self.iter_values(&args[0])?;
                 let mut filtered = Vec::new();
                 for value in values {
-                    let keep = self.call_value(args[1].clone(), vec![value.clone()])?;
+                    let keep = self
+                        .call_value(args[1].clone(), vec![value.clone()])
+                        .await?;
                     if self.require_bool(&keep, "filter predicate")? {
                         filtered.push(value);
                     }
@@ -1874,7 +1988,7 @@ impl Runtime {
                 require_arg_count("reduce", &args, 3)?;
                 let mut acc = args[1].clone();
                 for value in self.iter_values(&args[0])? {
-                    acc = self.call_value(args[2].clone(), vec![acc, value])?;
+                    acc = self.call_value(args[2].clone(), vec![acc, value]).await?;
                 }
                 Ok(acc)
             }
@@ -1886,9 +2000,10 @@ impl Runtime {
                 if ms < 0 {
                     return Err(runtime_error("nap milliseconds must be >= 0"));
                 }
-                Ok(Value::Task(Rc::new(RefCell::new(TaskData {
-                    value: Value::Null,
-                }))))
+                Ok(self.spawn_task(async move {
+                    sleep(Duration::from_millis(ms as u64)).await;
+                    Ok(Value::Null)
+                }))
             }
             BuiltinKind::MathAbs => {
                 require_arg_count("math.abs", &args, 1)?;
@@ -1918,8 +2033,8 @@ impl Runtime {
                 require_arg_count("math.random", &args, 0)?;
                 Ok(Value::Float(0.5))
             }
-            BuiltinKind::PathBfs => self.path_search(args, false),
-            BuiltinKind::PathAstar => self.path_search(args, true),
+            BuiltinKind::PathBfs => self.path_search(args, false).await,
+            BuiltinKind::PathAstar => self.path_search(args, true).await,
             BuiltinKind::ChaserDirection => {
                 require_arg_count("chaser.direction", &args, 2)?;
                 let src = require_point(&args[0], "chaser.direction expects Point, Point")?;
@@ -2071,14 +2186,13 @@ impl Runtime {
             }
             BuiltinKind::WebGrab => {
                 require_arg_count("web.grab", &args, 1)?;
-                self.web_grab(&args[0])
+                self.web_grab(&args[0]).await
             }
             BuiltinKind::WebFetch => {
                 require_arg_count("web.fetch", &args, 1)?;
-                let response = self.web_grab(&args[0])?;
-                Ok(Value::Task(Rc::new(RefCell::new(TaskData {
-                    value: response,
-                }))))
+                let options = args[0].clone();
+                let runtime = self.fork_for_task();
+                Ok(self.spawn_task(async move { runtime.web_grab(&options).await }))
             }
             BuiltinKind::TickNow => {
                 require_arg_count("tick.now", &args, 0)?;
@@ -2251,11 +2365,19 @@ impl Runtime {
             }
             NativeMethodKind::TaskDone => {
                 require_arg_count("Task.done", &args, 0)?;
-                Ok(Value::Bool(true))
+                if let Value::Task(task) = &method.receiver {
+                    Ok(Value::Bool(task_done(task)))
+                } else {
+                    unreachable!()
+                }
             }
             NativeMethodKind::TaskCancel => {
                 require_arg_count("Task.cancel", &args, 0)?;
-                Ok(Value::Bool(false))
+                if let Value::Task(task) = &method.receiver {
+                    Ok(Value::Bool(task_cancel(task)))
+                } else {
+                    unreachable!()
+                }
             }
         }
     }
@@ -2273,7 +2395,8 @@ impl Runtime {
         }
     }
 
-    fn path_search(&mut self, args: Vec<Value>, _astar: bool) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn path_search(&mut self, args: Vec<Value>, _astar: bool) -> Result<Value, Diagnostic> {
         require_arg_count("path search", &args, 4)?;
         let Value::Matrix(matrix) = &args[0] else {
             return Err(runtime_error("path functions expect Matrix, Point, Point"));
@@ -2304,7 +2427,7 @@ impl Runtime {
                     continue;
                 }
                 let cell = matrix_get(&matrix.borrow(), &[Value::Point(next)], false)?;
-                let ok = self.call_value(passable.clone(), vec![cell])?;
+                let ok = self.call_value(passable.clone(), vec![cell]).await?;
                 if !self.require_bool(&ok, "path passable predicate")? {
                     continue;
                 }
@@ -2560,7 +2683,7 @@ impl Runtime {
         }
     }
 
-    fn web_grab(&self, options: &Value) -> Result<Value, Diagnostic> {
+    async fn web_grab(&self, options: &Value) -> Result<Value, Diagnostic> {
         let request = WebRequestOptions::from_value(options)?;
         if let Some(payload) = request.url.strip_prefix("data:") {
             let (_, body) = payload.split_once(',').unwrap_or(("", payload));
@@ -2578,7 +2701,7 @@ impl Runtime {
         let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|err| {
             Diagnostic::new(Category::Network, format!("invalid HTTP method: {err}"))
         })?;
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(request.timeout_ms as u64))
             .build()
             .map_err(|err| {
@@ -2591,7 +2714,7 @@ impl Runtime {
         if let Some(body) = request.body {
             builder = builder.body(body);
         }
-        let response = builder.send().map_err(|err| {
+        let response = builder.send().await.map_err(|err| {
             Diagnostic::new(Category::Network, format!("network request failed: {err}"))
         })?;
         let status = response.status().as_u16() as i64;
@@ -2606,7 +2729,7 @@ impl Runtime {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let body = response.text().map_err(|err| {
+        let body = response.text().await.map_err(|err| {
             Diagnostic::new(
                 Category::Network,
                 format!("network response read failed: {err}"),
@@ -2726,497 +2849,8 @@ impl Runtime {
                 .is_some_and(|parent| self.den_wears(parent, mask))
     }
 
-    fn static_check(&self, program: &Program) -> Result<(), Diagnostic> {
-        let mut env = StaticEnv::default();
-        for item in &program.items {
-            match item {
-                Item::Function(def) | Item::HowlFunction(def) => {
-                    env.values.insert(
-                        def.name.clone(),
-                        StaticBinding {
-                            type_name: def.return_type.clone(),
-                            is_const: true,
-                        },
-                    );
-                }
-                Item::Den(den) => {
-                    env.values.insert(
-                        den.name.clone(),
-                        StaticBinding {
-                            type_name: Some(den.name.clone()),
-                            is_const: true,
-                        },
-                    );
-                }
-                Item::Mask(mask) => {
-                    env.values.insert(
-                        mask.name.clone(),
-                        StaticBinding {
-                            type_name: Some(mask.name.clone()),
-                            is_const: true,
-                        },
-                    );
-                }
-                _ => {}
-            }
-        }
-        for item in &program.items {
-            match item {
-                Item::Main { body, .. } => {
-                    self.static_check_block(body, &mut env.child(), false, None, None)?
-                }
-                Item::HowlMain { body, .. } => {
-                    self.static_check_block(body, &mut env.child(), true, None, None)?
-                }
-                Item::Function(def) => {
-                    let mut fn_env = env.child();
-                    for param in &def.params {
-                        fn_env.values.insert(
-                            param.name.clone(),
-                            StaticBinding {
-                                type_name: param.type_name.clone(),
-                                is_const: false,
-                            },
-                        );
-                    }
-                    self.static_check_block(
-                        &def.body,
-                        &mut fn_env,
-                        false,
-                        def.return_type.clone(),
-                        None,
-                    )?;
-                }
-                Item::HowlFunction(def) => {
-                    let mut fn_env = env.child();
-                    for param in &def.params {
-                        fn_env.values.insert(
-                            param.name.clone(),
-                            StaticBinding {
-                                type_name: param.type_name.clone(),
-                                is_const: false,
-                            },
-                        );
-                    }
-                    self.static_check_block(
-                        &def.body,
-                        &mut fn_env,
-                        true,
-                        def.return_type.clone(),
-                        None,
-                    )?;
-                }
-                Item::Den(den) => {
-                    for member in &den.members {
-                        if let DenMember::Method(method) = member {
-                            let mut method_env = env.child();
-                            method_env.values.insert(
-                                "self".to_string(),
-                                StaticBinding {
-                                    type_name: Some(den.name.clone()),
-                                    is_const: true,
-                                },
-                            );
-                            for param in &method.params {
-                                method_env.values.insert(
-                                    param.name.clone(),
-                                    StaticBinding {
-                                        type_name: param.type_name.clone(),
-                                        is_const: false,
-                                    },
-                                );
-                            }
-                            self.static_check_block(
-                                &method.body,
-                                &mut method_env,
-                                false,
-                                method.return_type.clone(),
-                                Some(den.name.clone()),
-                            )?;
-                        }
-                    }
-                }
-                Item::Probe { body, .. } | Item::Stmt(Stmt::InsaneBlock(body)) => {
-                    self.static_check_block(body, &mut env.child(), false, None, None)?;
-                }
-                Item::Stmt(stmt) => self.static_check_stmt(stmt, &mut env, false, None, None)?,
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn static_check_block(
-        &self,
-        body: &[Stmt],
-        env: &mut StaticEnv,
-        howl: bool,
-        return_type: Option<String>,
-        current_den: Option<String>,
-    ) -> Result<(), Diagnostic> {
-        for stmt in body {
-            self.static_check_stmt(stmt, env, howl, return_type.clone(), current_den.clone())?;
-        }
-        Ok(())
-    }
-
-    fn static_check_stmt(
-        &self,
-        stmt: &Stmt,
-        env: &mut StaticEnv,
-        howl: bool,
-        return_type: Option<String>,
-        current_den: Option<String>,
-    ) -> Result<(), Diagnostic> {
-        match stmt {
-            Stmt::Let {
-                name,
-                expr,
-                type_name,
-                is_const,
-            } => {
-                self.static_check_expr(expr, env, howl, current_den.clone())?;
-                if let Some(type_name) = type_name {
-                    if let Some(expr_type) = self.static_expr_type(expr, env) {
-                        self.static_require_assignable(&expr_type, type_name, name)?;
-                    }
-                }
-                env.values.insert(
-                    name.clone(),
-                    StaticBinding {
-                        type_name: type_name
-                            .clone()
-                            .or_else(|| self.static_expr_type(expr, env)),
-                        is_const: *is_const,
-                    },
-                );
-            }
-            Stmt::If {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                self.static_check_expr(condition, env, howl, current_den.clone())?;
-                if let Some(kind) = self.static_expr_type(condition, env) {
-                    if kind != "Bool" {
-                        return Err(runtime_error("if condition must be Bool"));
-                    }
-                }
-                self.static_check_block(
-                    then_body,
-                    &mut env.child(),
-                    howl,
-                    return_type.clone(),
-                    current_den.clone(),
-                )?;
-                if let Some(else_body) = else_body {
-                    match else_body {
-                        ElseBody::If(stmt) => {
-                            self.static_check_stmt(stmt, env, howl, return_type, current_den)?
-                        }
-                        ElseBody::Block(body) => self.static_check_block(
-                            body,
-                            &mut env.child(),
-                            howl,
-                            return_type,
-                            current_den,
-                        )?,
-                    }
-                }
-            }
-            Stmt::While { condition, body } => {
-                self.static_check_expr(condition, env, howl, current_den.clone())?;
-                if let Some(kind) = self.static_expr_type(condition, env) {
-                    if kind != "Bool" {
-                        return Err(runtime_error("while condition must be Bool"));
-                    }
-                }
-                self.static_check_block(body, &mut env.child(), howl, return_type, current_den)?;
-            }
-            Stmt::For {
-                name,
-                iterable,
-                body,
-                ..
-            } => {
-                self.static_check_expr(iterable, env, howl, current_den.clone())?;
-                let mut loop_env = env.child();
-                loop_env.values.insert(
-                    name.clone(),
-                    StaticBinding {
-                        type_name: None,
-                        is_const: false,
-                    },
-                );
-                self.static_check_block(body, &mut loop_env, howl, return_type, current_den)?;
-            }
-            Stmt::Return(expr) => {
-                if let Some(expr) = expr {
-                    self.static_check_expr(expr, env, howl, current_den.clone())?;
-                    if let (Some(expected), Some(actual)) =
-                        (return_type.as_ref(), self.static_expr_type(expr, env))
-                    {
-                        self.static_require_assignable(&actual, expected, "return value")?;
-                    }
-                } else if return_type.as_deref().is_some_and(|kind| kind != "Void") {
-                    return Err(runtime_error(format!(
-                        "return value must be {}",
-                        return_type.unwrap()
-                    )));
-                }
-            }
-            Stmt::Expr(expr) | Stmt::Panic(expr) | Stmt::Expect(expr) => {
-                self.static_check_expr(expr, env, howl, current_den)?
-            }
-            Stmt::Squeak(exprs) | Stmt::Trace(exprs) => {
-                for expr in exprs {
-                    self.static_check_expr(expr, env, howl, current_den.clone())?;
-                }
-            }
-            Stmt::Try {
-                body,
-                catch_name,
-                catch_body,
-                ..
-            } => {
-                self.static_check_block(
-                    body,
-                    &mut env.child(),
-                    howl,
-                    return_type.clone(),
-                    current_den.clone(),
-                )?;
-                if let Some(catch_body) = catch_body {
-                    let mut catch_env = env.child();
-                    if let Some(catch_name) = catch_name {
-                        catch_env.values.insert(
-                            catch_name.clone(),
-                            StaticBinding {
-                                type_name: Some("String".to_string()),
-                                is_const: false,
-                            },
-                        );
-                    }
-                    self.static_check_block(
-                        catch_body,
-                        &mut catch_env,
-                        howl,
-                        return_type,
-                        current_den,
-                    )?;
-                }
-            }
-            Stmt::InsaneBlock(body) => {
-                self.static_check_block(body, &mut env.child(), howl, return_type, current_den)?
-            }
-            Stmt::Break | Stmt::Continue => {}
-        }
-        Ok(())
-    }
-
-    fn static_check_expr(
-        &self,
-        expr: &Expr,
-        env: &StaticEnv,
-        howl: bool,
-        current_den: Option<String>,
-    ) -> Result<(), Diagnostic> {
-        match expr {
-            Expr::Wait(inner) => {
-                if !howl {
-                    return Err(runtime_error("wait can only be used inside howl context"));
-                }
-                self.static_check_expr(inner, env, howl, current_den)
-            }
-            Expr::Scatter { expr, .. } => {
-                if !howl {
-                    return Err(runtime_error(
-                        "scatter can only be used inside howl context",
-                    ));
-                }
-                self.static_check_expr(expr, env, howl, current_den)
-            }
-            Expr::Nest(items) => {
-                if !howl {
-                    return Err(runtime_error("nest can only be used inside howl context"));
-                }
-                for item in items {
-                    self.static_check_expr(item, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Assign { target, value } => {
-                if let Expr::Var(name) = target.as_ref() {
-                    if env.get(name).is_some_and(|binding| binding.is_const) {
-                        return Err(runtime_error(format!("{name} is a stash constant")));
-                    }
-                }
-                self.static_check_expr(target, env, howl, current_den.clone())?;
-                self.static_check_expr(value, env, howl, current_den)
-            }
-            Expr::Binary { left, right, .. } => {
-                self.static_check_expr(left, env, howl, current_den.clone())?;
-                self.static_check_expr(right, env, howl, current_den)
-            }
-            Expr::Unary { expr, .. } | Expr::InsaneChoose(expr) => {
-                self.static_check_expr(expr, env, howl, current_den)
-            }
-            Expr::Array(items) | Expr::Matrix(items) => {
-                for item in items {
-                    self.static_check_expr(item, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Map(pairs) => {
-                for (key, value) in pairs {
-                    self.static_check_expr(key, env, howl, current_den.clone())?;
-                    self.static_check_expr(value, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Point { x, y } | Expr::Range { start: x, end: y } => {
-                self.static_check_expr(x, env, howl, current_den.clone())?;
-                self.static_check_expr(y, env, howl, current_den)
-            }
-            Expr::Call { callee, args } => {
-                self.static_check_expr(callee, env, howl, current_den.clone())?;
-                for arg in args {
-                    self.static_check_expr(arg, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Index { target, args } => {
-                self.static_check_expr(target, env, howl, current_den.clone())?;
-                for arg in args {
-                    self.static_check_expr(arg, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Member { target, name } => {
-                self.static_check_expr(target, env, howl, current_den.clone())?;
-                if let Some(target_type) = self.static_expr_type(target, env) {
-                    if let Some(mask) = self.masks.get(&target_type) {
-                        if !mask.methods.contains_key(name) {
-                            return Err(runtime_error(format!(
-                                "mask {target_type} has no member {name}"
-                            )));
-                        }
-                    }
-                    if self.dens.contains_key(&target_type) {
-                        if let Some(field) = self.find_field(&target_type, name) {
-                            if field.access == Access::Fang
-                                && current_den.as_deref() != Some(field.owner.as_str())
-                            {
-                                return Err(runtime_error(format!(
-                                    "{target_type}.{name} is private"
-                                )));
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(expr) => self.static_check_expr(expr, env, howl, current_den),
-                LambdaBody::Block(body) => {
-                    self.static_check_block(body, &mut env.child(), howl, None, current_den)
-                }
-            },
-            Expr::Tunnel { left, right } => {
-                self.static_check_expr(left, env, howl, current_den.clone())?;
-                self.static_check_expr(right, env, howl, current_den)
-            }
-            Expr::Hatch { args, .. } => {
-                for arg in args {
-                    self.static_check_expr(arg, env, howl, current_den.clone())?;
-                }
-                Ok(())
-            }
-            Expr::Literal(_) | Expr::Var(_) | Expr::Sniff => Ok(()),
-        }
-    }
-
-    fn static_expr_type(&self, expr: &Expr, env: &StaticEnv) -> Option<String> {
-        match expr {
-            Expr::Literal(Literal::Null) => Some("Null".to_string()),
-            Expr::Literal(Literal::Bool(_)) => Some("Bool".to_string()),
-            Expr::Literal(Literal::Int(_)) => Some("Int".to_string()),
-            Expr::Literal(Literal::Float(_)) => Some("Float".to_string()),
-            Expr::Literal(Literal::String(_)) => Some("String".to_string()),
-            Expr::Array(items) => {
-                if let Some(first) = items
-                    .first()
-                    .and_then(|item| self.static_expr_type(item, env))
-                {
-                    Some(format!("Array<{first}>"))
-                } else {
-                    Some("Array".to_string())
-                }
-            }
-            Expr::Matrix(rows) => {
-                if let Some(Expr::Array(items)) = rows.first() {
-                    if let Some(first) = items
-                        .first()
-                        .and_then(|item| self.static_expr_type(item, env))
-                    {
-                        return Some(format!("Matrix<{first}>"));
-                    }
-                }
-                Some("Matrix".to_string())
-            }
-            Expr::Point { .. } => Some("Point".to_string()),
-            Expr::Hatch { name, .. } => Some(name.clone()),
-            Expr::Var(name) => env.get(name).and_then(|binding| binding.type_name.clone()),
-            Expr::Binary { op, .. }
-                if ["==", "!=", "<", "<=", ">", ">=", "&&", "||"].contains(&op.as_str()) =>
-            {
-                Some("Bool".to_string())
-            }
-            Expr::Binary { left, op, right } if op == "+" => {
-                let left = self.static_expr_type(left, env);
-                let right = self.static_expr_type(right, env);
-                if left.as_deref() == Some("String") || right.as_deref() == Some("String") {
-                    Some("String".to_string())
-                } else {
-                    left.or(right)
-                }
-            }
-            Expr::Member { target, name } => {
-                let target_type = self.static_expr_type(target, env)?;
-                self.find_field(&target_type, name)
-                    .and_then(|field| field.type_name)
-            }
-            _ => None,
-        }
-    }
-
-    fn static_require_assignable(
-        &self,
-        actual: &str,
-        expected: &str,
-        label: &str,
-    ) -> Result<(), Diagnostic> {
-        let expected_ref = parse_type_ref(expected)?;
-        let actual_base = parse_type_ref(actual)?.name;
-        let ok = expected_ref.name == "Any"
-            || actual_base == "Null"
-            || actual_base == expected_ref.name
-            || (expected_ref.name == "Float" && actual_base == "Int")
-            || (self.dens.contains_key(&expected_ref.name)
-                && self.den_is_a(&actual_base, &expected_ref.name))
-            || (self.masks.contains_key(&expected_ref.name)
-                && self.den_wears(&actual_base, &expected_ref.name));
-        if !ok {
-            Err(runtime_error(format!(
-                "{label} must be {}",
-                expected_ref.text()
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn load_namespace(&mut self, name: &str) -> Result<Value, Diagnostic> {
+    #[async_recursion::async_recursion(?Send)]
+    async fn load_namespace(&mut self, name: &str) -> Result<Value, Diagnostic> {
         match name {
             "math" => return Ok(self.math_namespace()),
             "path" => return Ok(self.path_namespace()),
@@ -3239,7 +2873,9 @@ impl Runtime {
             .embedded_sources
             .get(&normalize_embedded_key(&module_path))
         {
-            return self.load_module_from_source(name, &module_path, source.clone());
+            return self
+                .load_module_from_source(name, &module_path, source.clone())
+                .await;
         }
 
         if !module_path.exists() {
@@ -3269,9 +2905,11 @@ impl Runtime {
         }
         let source = fs::read_to_string(&module_path).map_err(io_error)?;
         self.load_module_from_source(name, &module_path, source)
+            .await
     }
 
-    fn load_module_from_source(
+    #[async_recursion::async_recursion(?Send)]
+    async fn load_module_from_source(
         &mut self,
         name: &str,
         module_path: &Path,
@@ -3289,7 +2927,7 @@ impl Runtime {
             stack
         };
         runtime.embedded_sources = self.embedded_sources.clone();
-        runtime.run(&program, false)?;
+        runtime.run_async(&program, false).await?;
         let hidden = core_names();
         let values = runtime
             .env
@@ -3440,6 +3078,66 @@ fn should_skip_top_level_execute(item: &Item) -> bool {
             | Item::Probe { .. }
             | Item::Pack(_)
     )
+}
+
+async fn wait_task(task: TaskRef) -> Result<Value, Diagnostic> {
+    let handle = {
+        let mut task = task.borrow_mut();
+        if let Some(result) = task.result.clone() {
+            return result;
+        }
+        if task.state == TaskState::Canceled {
+            return Err(runtime_error("task canceled"));
+        }
+        task.handle.take()
+    };
+
+    let Some(handle) = handle else {
+        return Err(runtime_error("task has no runnable handle"));
+    };
+
+    let result = match handle.await {
+        Ok(result) => result,
+        Err(err) if err.is_cancelled() => Err(runtime_error("task canceled")),
+        Err(err) => Err(runtime_error(format!("task failed to join: {err}"))),
+    };
+
+    let mut task_data = task.borrow_mut();
+    task_data.state = if result.is_ok() {
+        TaskState::Ready
+    } else {
+        TaskState::Failed
+    };
+    task_data.result = Some(result.clone());
+    result
+}
+
+fn task_done(task: &TaskRef) -> bool {
+    let task = task.borrow();
+    matches!(
+        task.state,
+        TaskState::Ready | TaskState::Failed | TaskState::Canceled
+    ) || task.handle.as_ref().is_some_and(JoinHandle::is_finished)
+}
+
+fn task_cancel(task: &TaskRef) -> bool {
+    let mut task = task.borrow_mut();
+    if matches!(
+        task.state,
+        TaskState::Ready | TaskState::Failed | TaskState::Canceled
+    ) {
+        return false;
+    }
+    if task.handle.as_ref().is_some_and(JoinHandle::is_finished) {
+        return false;
+    }
+    let Some(handle) = task.handle.take() else {
+        return false;
+    };
+    handle.abort();
+    task.state = TaskState::Canceled;
+    task.result = Some(Err(runtime_error("task canceled")));
+    true
 }
 
 fn find_env(env: &EnvRef, name: &str) -> Option<EnvRef> {
@@ -3820,18 +3518,6 @@ fn split_type_args(text: &str) -> Vec<String> {
     args
 }
 
-#[derive(Clone, Debug, Default)]
-struct StaticEnv {
-    parent: Option<Box<StaticEnv>>,
-    values: BTreeMap<String, StaticBinding>,
-}
-
-#[derive(Clone, Debug)]
-struct StaticBinding {
-    type_name: Option<String>,
-    is_const: bool,
-}
-
 struct WebRequestOptions {
     method: String,
     url: String,
@@ -3908,21 +3594,6 @@ impl WebRequestOptions {
             return Err(runtime_error("web request timeout_ms must be > 0"));
         }
         Ok(options)
-    }
-}
-
-impl StaticEnv {
-    fn child(&self) -> StaticEnv {
-        StaticEnv {
-            parent: Some(Box::new(self.clone())),
-            values: BTreeMap::new(),
-        }
-    }
-
-    fn get(&self, name: &str) -> Option<&StaticBinding> {
-        self.values
-            .get(name)
-            .or_else(|| self.parent.as_ref().and_then(|parent| parent.get(name)))
     }
 }
 

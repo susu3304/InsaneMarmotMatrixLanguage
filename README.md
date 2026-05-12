@@ -2,19 +2,17 @@
 
 `insane marmot matrix`、略称 `IMM` は、行列・座標・盤面処理を簡潔に書くための小さな実験言語です。
 
-このリポジトリには、仕様 v0.1 の最初のインタプリタ実装が入っています。依存パッケージなしの Python 実装です。
+このリポジトリには、仕様 v0.1 の Rust 実装が入っています。lexer / parser / checker / runtime は Rust 側で直接持ち、Python 版への委譲や同梱は行いません。
 
 ## 実行
 
 ```bash
-./imm --version
-./imm check examples/hello.imm
-./imm run examples/hello.imm
-./imm probe
-./imm law
-./imm pack examples/hello.imm --crate dist/hello.pyz --pelt python
-./imm pack examples/hello.imm --crate dist/hello-native --pelt native
-cd native/imm-native && cargo run -- run ../../examples/hello.imm
+cargo run -- --version
+cargo run -- check examples/hello.imm
+cargo run -- run examples/hello.imm
+cargo run -- probe
+cargo run -- law
+cargo run -- pack examples/hello.imm --crate dist/hello-native --pelt native
 ```
 
 出力例:
@@ -50,9 +48,8 @@ Hello, insane marmot matrix!
 - `nap` / `tick.now()`
 - `probe` / `expect` / `imm law`
 - `trace` と `imm run --trace`
-- `imm pack --pelt python` による zipapp パッケージ
-- `imm pack --pelt native` による Python-free Rust 実行バイナリ
-- `imm-native` Rust CLI による `run` / `check` / `fmt` / `probe` / `law` / `pack` / `spec`
+- `imm-native pack --pelt native` による単体 Rust 実行バイナリ
+- Rust CLI による `run` / `check` / `fmt` / `probe` / `law` / `pack` / `spec`
 
 ## 例
 
@@ -84,17 +81,16 @@ marmot main {
 ## コマンド
 
 ```bash
-./imm run main.imm
-./imm run main.imm --trace
-./imm check main.imm
-./imm fmt main.imm
-./imm fmt --check main.imm
-./imm probe [file.imm]
-./imm law
-./imm pack main.imm --crate dist/app.pyz --pelt python
-./imm pack main.imm --crate dist/app --pelt native
-./imm spec --json
-./imm --version
+cargo run -- run main.imm
+cargo run -- run main.imm --trace
+cargo run -- check main.imm
+cargo run -- fmt main.imm
+cargo run -- fmt --check main.imm
+cargo run -- probe [file.imm]
+cargo run -- law
+cargo run -- pack main.imm --crate dist/app --pelt native
+cargo run -- spec --json
+cargo run -- --version
 ```
 
 `check` は構文解析に加えて、宣言準備、モジュール解決、循環 import 検出、静的に判定できるリテラル型チェックを行います。`marmot main` やトップレベル文は実行しません。
@@ -105,12 +101,14 @@ marmot main {
 
 `store` ライブラリには、外部DBなしで `den` オブジェクトを永続化する `open`、`save`、`load`、`all`、`find`、`get`、`delete`、`count`、`clear` が入っています。保存ファイルの拡張子は慣例として `.immstore` です。
 
-`web` ライブラリには同期 `grab` と howl 向けの `fetch` が入っています。`howl` タスク、`probe`/`law`、`trace`、`pack`、Rust native track の詳細は `docs/web-spec.md`、`docs/howl-spec.md`、`docs/pack-spec.md`、`native/README.md` を参照してください。
+`web` ライブラリには async HTTP の `grab` と howl 向けの `fetch` が入っています。`howl` タスク、`probe`/`law`、`trace`、`pack` の詳細は `docs/web-spec.md`、`docs/howl-spec.md`、`docs/pack-spec.md` を参照してください。
 
 ## 開発
 
 ```bash
-python3 tests/run_tests.py
+cargo fmt --check
+cargo test
+cargo run -- law
 ```
 
 ## VS Code

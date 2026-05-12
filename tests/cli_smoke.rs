@@ -38,7 +38,7 @@ fn spec_json_is_parseable() {
 #[test]
 fn run_executes_native_runtime() {
     let output = Command::new(env!("CARGO_BIN_EXE_imm-native"))
-        .args(["run", "../../examples/hello.imm"])
+        .args(["run", "examples/hello.imm"])
         .output()
         .expect("run imm-native hello");
     assert!(
@@ -133,4 +133,38 @@ marmot main {{
         String::from_utf8_lossy(&output.stdout),
         "200\ntrue\nPOST\nnative-body\n"
     );
+}
+
+#[test]
+fn scatter_runs_tasks_concurrently() {
+    let dir = std::env::temp_dir().join(format!("imm-native-async-test-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("async.imm");
+    fs::write(
+        &file,
+        r#"use tick
+
+howl marmot main {
+    let start = tick.now()
+    let left = scatter wait nap(500)
+    let right = scatter wait nap(500)
+    wait left
+    wait right
+    squeak tick.now() - start < 850
+}
+"#,
+    )
+    .expect("write IMM async program");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_imm-native"))
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("run imm-native async program");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n");
 }

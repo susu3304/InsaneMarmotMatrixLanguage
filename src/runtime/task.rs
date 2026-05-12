@@ -3,4 +3,5 @@ pub enum TaskState {
     Pending,
     Ready,
     Failed,
+    Canceled,
 }

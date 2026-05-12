@@ -4,9 +4,9 @@ This roadmap turns the current v0.1 interpreter into a complete `insane marmot m
 
 ## Current State
 
-The current implementation is a tree-walking interpreter. It already supports the core executable shape:
+The current implementation is a Rust tree-walking interpreter. It already supports the core executable shape:
 
-- CLI: `imm run`, `imm check`, `imm fmt`, `imm --version`
+- CLI: `imm-native run`, `imm-native check`, `imm-native fmt`, `imm-native --version`
 - Entry points: `marmot main`, `insane marmot main`
 - Declarations: `dig`, `let`, `stash`
 - Core values: `Int`, `Float`, `Bool`, `String`, `Array`, `Matrix`, `Point`, `Null`
@@ -31,7 +31,7 @@ Goal: make the current interpreter hard to accidentally break.
 
 Exit criteria:
 
-- `python3 tests/run_tests.py` passes.
+- `cargo test` passes.
 - Every example in `examples/` either runs or has a documented reason not to.
 - Roadmap and compliance docs match the actual implementation.
 
@@ -154,7 +154,7 @@ Exit criteria:
 
 The previous implementation slice completed Milestone 0 plus the first practical pieces of Milestone 1:
 
-- Add `tests/run_tests.py`.
+- Add Rust CLI smoke tests.
 - Add a compliance document.
 - Enforce generic runtime types for `Array<T>` and `Matrix<T>`.
 - Make `insane for` unordered.
@@ -169,9 +169,9 @@ The next slice should focus on static analysis:
 5. Start the source-span work needed for full diagnostics.
 
 The Rust migration slice completed the operational RUST-001 through RUST-018
-gate: `imm-native` has the full CLI surface, Rust lexer/parser/evaluator
+gate: the root Rust crate has the full CLI surface, Rust lexer/parser/evaluator
 coverage, cargo fmt/clippy/test coverage, shared law execution, and an enabled
-Python-free `imm pack --pelt native` executable artifact. The next native slice
+`imm pack --pelt native` executable artifact. The next native slice
 should harden diagnostics and grow law coverage for every runtime surface.
 
 ## No More Placeholder Policy

@@ -43,8 +43,8 @@ Status legend:
 | `math` library | done | Required math functions are available. |
 | `path` library | done | Basic BFS and A* are available. |
 | `store` library | partial | Built-in JSON-backed object persistence supports open/save/load/all/find/get/delete/count/clear for `den` objects. Transactions, indexes, and concurrent writers are planned. |
-| `web` library | done | Python and Rust support `web.grab` / `web.fetch`, `data:` URLs, HTTP method/header/body/timeout options, `Response` fields/methods, JSON/text helpers, and HTTP error statuses as values. |
-| `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run through the task runtime. |
+| `web` library | done | Rust supports async `web.grab` / `web.fetch`, `data:` URLs, HTTP method/header/body/timeout options, `Response` fields/methods, JSON/text helpers, and HTTP error statuses as values. |
+| `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run through the tokio-backed task runtime. |
 | `tick` library | done | `tick.now()` returns UNIX milliseconds. |
 | `probe` / `expect` | done | Probe blocks parse, check, and run through `imm probe`; failed expects report the file and probe name. |
 | `law` suite | done | `imm law` runs shared `.law.imm` probe files under `laws/`. |
@@ -52,14 +52,14 @@ Status legend:
 | Block/function scope | done | Nested lexical environments and shadowing are implemented. |
 | Static type system | partial | Runtime checks exist, and `imm check` checks functions, methods, main blocks, conditions, assignments, returns, calls, object members, mask views, literal declarations, and field initializers. Full flow-sensitive checking and source spans are planned. |
 | Null safety | partial | Safe-mode runtime errors exist. Insane-mode relaxed behavior is planned. |
-| `imm run` | done | Runs `.imm` files. |
-| `imm check` | partial | Parses, prepares declarations, resolves modules, detects module cycles, and performs broad static checks without executing top-level statements or `marmot main`. Source-span diagnostics are planned. |
-| `imm fmt` | partial | Preserves comments/strings and normalizes indentation, line endings, and trailing whitespace. Full AST-preserving reflow is planned. |
-| `imm probe` | done | Discovers `tests/imm/*.probe.imm` by default or runs explicit files. |
-| `imm law` | done | Runs the conformance probes in `laws/`. |
-| `imm pack --pelt python` | done | Produces a runnable zipapp artifact containing the interpreter and entry-directory IMM sources. |
-| `imm pack --pelt native` | done | Produces a runnable Python-free Rust executable containing the native evaluator and entry-directory IMM sources. |
-| Native runtime track | done | `native/imm-native` exposes the full CLI surface, parses and evaluates IMM directly in Rust, runs the shared law/probe/golden surface, supports native HTTP, and passes Rust CI checks. |
+| `imm-native run` | done | Runs `.imm` files. |
+| `imm-native check` | partial | Parses, prepares declarations, resolves modules, detects module cycles, and performs broad static checks without executing top-level statements or `marmot main`. Source-span diagnostics are planned. |
+| `imm-native fmt` | partial | Preserves comments/strings and normalizes indentation, line endings, and trailing whitespace. Full AST-preserving reflow is planned. |
+| `imm-native probe` | done | Discovers `tests/imm/*.probe.imm` by default or runs explicit files. |
+| `imm-native law` | done | Runs the conformance probes in `laws/`. |
+| `imm-native pack --pelt python` | removed | The Python pelt was removed with the Python implementation. Use `--pelt native`. |
+| `imm-native pack --pelt native` | done | Produces a runnable Rust executable containing the evaluator and entry-directory IMM sources. |
+| Native runtime track | done | The root Rust crate exposes the full CLI surface, parses and evaluates IMM directly in Rust, runs the shared law/probe/golden surface, supports native HTTP, and passes Rust CI checks. |
 | Machine-readable spec output | done | `imm spec --json` emits language metadata. |
 | VM, bytecode, LSP | planned | Advanced tooling milestones. |
 | CHaser runtime | partial | `chaser` helpers are available for directions, steps, field parsing, safe moves, and random moves. Full turn-loop runtime is planned. |

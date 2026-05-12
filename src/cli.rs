@@ -217,7 +217,7 @@ fn command_pack(
     if pelt != "native" {
         return Err(Diagnostic::new(
             Category::Pack,
-            "imm-native only builds --pelt native artifacts",
+            "python pelt has been removed from this Rust-only runtime; use --pelt native",
         ));
     }
     let out = crate_path
@@ -296,7 +296,10 @@ fn discover_probe_files(root: &Path) -> Vec<PathBuf> {
 fn repo_root() -> Result<PathBuf, Diagnostic> {
     let mut current = std::env::current_dir().map_err(io_error)?;
     loop {
-        if current.join("imm").is_file() && current.join("laws").is_dir() {
+        if current.join("Cargo.toml").is_file()
+            && current.join("src").is_dir()
+            && current.join("laws").is_dir()
+        {
             return Ok(current);
         }
         if !current.pop() {
