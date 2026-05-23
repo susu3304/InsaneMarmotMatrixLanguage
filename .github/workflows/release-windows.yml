@@ -24,9 +24,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Test
         shell: pwsh
-        run: cargo test --locked
+        run: |
+          cargo test --locked
+          Push-Location editors\vscode\imm
+          npm test
+          Pop-Location
 
       - name: Build release binary
         shell: pwsh
@@ -64,6 +73,13 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path dist\winget\* -DestinationPath dist\imm-winget-manifests.zip -Force
 
+      - name: Package VS Code extension
+        shell: pwsh
+        run: |
+          Push-Location editors\vscode\imm
+          npm run package -- --out ..\..\..\dist\imm-vscode-$env:IMM_VERSION.vsix
+          Pop-Location
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -71,6 +87,7 @@ jobs:
           path: |
             dist/imm-windows-x64.zip
             dist/imm-winget-manifests.zip
+            dist/imm-vscode-*.vsix
 
       - name: Publish GitHub release
         if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -80,14 +97,14 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $notes = @"
-          Windows x64 portable release for IMM.
+          Windows x64 portable release and VS Code extension package for IMM.
 
           SHA256:
           $env:IMM_WINDOWS_X64_SHA256
           "@
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag dist\imm-windows-x64.zip dist\imm-winget-manifests.zip --clobber
+            gh release upload $tag dist\imm-windows-x64.zip dist\imm-winget-manifests.zip dist\imm-vscode-*.vsix --clobber
           } else {
-            gh release create $tag dist\imm-windows-x64.zip dist\imm-winget-manifests.zip --title $tag --notes $notes
+            gh release create $tag dist\imm-windows-x64.zip dist\imm-winget-manifests.zip dist\imm-vscode-*.vsix --title $tag --notes $notes
           }

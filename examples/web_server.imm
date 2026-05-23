@@ -1,0 +1,62 @@
+use web
+
+dig home(ctx) {
+    return web.html("<h1>Hello insane marmot matrix</h1>")
+}
+
+dig create_user(ctx) {
+    let body = ctx.req.crack()
+
+    return web.shiny({
+        "name": body["name"],
+        "ok": true,
+        "marmot": "insane"
+    }, 201)
+}
+
+dig show_user(ctx) {
+    let id = ctx.paws["id"]
+
+    return web.shiny({
+        "id": id,
+        "trail": ctx.trail
+    })
+}
+
+dig not_found(ctx) {
+    return web.lost("marmot could not find this burrow")
+}
+
+dig rescue(ctx) {
+    return web.panic("marmot panicked")
+}
+
+marmot main {
+    let den = web.den()
+    let api = web.burrow()
+
+    den.wear(web.trace())
+    den.wear(web.recover())
+    den.wear(web.cors({
+        "origin": "*"
+    }))
+
+    den.sniff("/", home)
+    den.hoard("/assets", "./public")
+
+    api.sniff("/users/:id", show_user)
+    api.stash("/users", create_user)
+
+    den.dig("/api", api)
+
+    den.lost(not_found)
+    den.rescue(rescue)
+
+    web.release(den, {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "workers": 4,
+        "max_body_bytes": 1048576,
+        "request_timeout_ms": 10000
+    })
+}

@@ -15,7 +15,10 @@ fn version_mentions_native_runtime() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "insane marmot matrix native 0.1.0\n"
+        format!(
+            "insane marmot matrix native {}\n",
+            env!("CARGO_PKG_VERSION")
+        )
     );
 }
 

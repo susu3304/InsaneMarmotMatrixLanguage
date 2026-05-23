@@ -53,6 +53,10 @@ insane marmot main {
 dig add(a: Int, b: Int) -> Int {
     return a + b
 }
+
+dig home(ctx: WebApp) {
+    return web.shiny({ "ok": true })
+}
 `);
 
 function hasToken(value, type) {
@@ -73,6 +77,12 @@ if (!hasToken("a", "variable")) {
 }
 if (!hasToken("squeak", "function")) {
   throw new Error("expected squeak to receive builtin function semantic color");
+}
+if (!hasToken("WebApp", "type")) {
+  throw new Error("expected WebApp to receive type semantic color");
+}
+if (!hasToken("shiny", "method")) {
+  throw new Error("expected shiny to receive member method semantic color");
 }
 
 console.log("extension metadata ok");

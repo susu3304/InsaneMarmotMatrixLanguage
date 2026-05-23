@@ -1,0 +1,80 @@
+use web
+
+dig home(ctx) {
+    return web.squeak("home")
+}
+
+dig show_user(ctx) {
+    return web.shiny({
+        "id": ctx.paws["id"],
+        "verbose": ctx.trail["verbose"]
+    })
+}
+
+dig create_user(ctx) {
+    let body = ctx.req.crack()
+    return web.shiny({
+        "name": body["name"],
+        "ok": true
+    }, 201)
+}
+
+dig not_found(ctx) {
+    return web.lost("missing burrow")
+}
+
+probe "web den serves sniff route" {
+    let den = web.den()
+    den.sniff("/", home)
+
+    let server = web.peek(den, { "port": 0 })
+    let res = web.grab(server.url + "/")
+
+    expect res.status == 200
+    expect res.body == "home"
+
+    server.stop()
+}
+
+probe "web burrow params query and json body" {
+    let den = web.den()
+    let api = web.burrow()
+
+    api.sniff("/users/:id", show_user)
+    api.stash("/users", create_user)
+    den.dig("/api", api)
+
+    let server = web.peek(den, { "port": 0 })
+
+    let show = web.grab(server.url + "/api/users/42?verbose=yes")
+    expect show.status == 200
+    expect show.json()["id"] == "42"
+    expect show.json()["verbose"] == "yes"
+
+    let created = web.grab({
+        "method": "POST",
+        "url": server.url + "/api/users",
+        "headers": {
+            "content-type": "application/json"
+        },
+        "body": "{\"name\":\"marmot\"}"
+    })
+    expect created.status == 201
+    expect created.json()["name"] == "marmot"
+    expect created.json()["ok"] == true
+
+    server.stop()
+}
+
+probe "web lost handler" {
+    let den = web.den()
+    den.lost(not_found)
+
+    let server = web.peek(den, { "port": 0 })
+    let res = web.grab(server.url + "/missing")
+
+    expect res.status == 404
+    expect res.body == "missing burrow"
+
+    server.stop()
+}

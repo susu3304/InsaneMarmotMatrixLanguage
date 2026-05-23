@@ -2,14 +2,18 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as JsonValue};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
+use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, LocalSet};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::ast::*;
 use crate::checker;
@@ -26,6 +30,10 @@ type ArrayRef = Rc<RefCell<Vec<Value>>>;
 type MapRef = Rc<RefCell<BTreeMap<String, Value>>>;
 type StoreRef = Rc<RefCell<StoreDatabase>>;
 type TaskRef = Rc<RefCell<TaskData>>;
+type WebAppRef = Rc<RefCell<WebApp>>;
+type WebContextRef = Rc<RefCell<WebContext>>;
+type WebRequestRef = Rc<WebRequest>;
+type WebServerRef = Rc<WebServer>;
 type ModuleCache = Rc<RefCell<HashMap<PathBuf, Value>>>;
 
 #[derive(Clone)]
@@ -52,6 +60,11 @@ pub enum Value {
     ObjectMethod(Rc<ObjectBoundMethod>),
     UnderProxy { object: ObjRef, parent: String },
     Response(Rc<Response>),
+    WebApp(WebAppRef),
+    WebContext(WebContextRef),
+    WebMiddleware(Rc<WebMiddleware>),
+    WebRequest(WebRequestRef),
+    WebServer(WebServerRef),
     Task(TaskRef),
     TaskGroup(Vec<Value>),
     Store(StoreRef),
@@ -188,6 +201,76 @@ pub struct Response {
     ok: bool,
 }
 
+#[derive(Clone)]
+pub struct WebApp {
+    routes: Vec<WebRoute>,
+    middleware: Vec<Value>,
+    mounts: Vec<WebMount>,
+    static_dirs: Vec<WebStatic>,
+    not_found: Option<Value>,
+    error_handler: Option<Value>,
+}
+
+#[derive(Clone)]
+struct WebRoute {
+    method: WebRouteMethod,
+    path: String,
+    handler: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WebRouteMethod {
+    Any,
+    Method(String),
+}
+
+#[derive(Clone)]
+struct WebMount {
+    prefix: String,
+    app: WebAppRef,
+}
+
+#[derive(Clone)]
+struct WebStatic {
+    prefix: String,
+    directory: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct WebContext {
+    req: WebRequestRef,
+    params: BTreeMap<String, Value>,
+    query: BTreeMap<String, Value>,
+    state: MapRef,
+}
+
+#[derive(Clone)]
+pub struct WebRequest {
+    method: String,
+    path: String,
+    query: BTreeMap<String, Value>,
+    headers: BTreeMap<String, Value>,
+    cookies: BTreeMap<String, Value>,
+    body: String,
+    remote: String,
+}
+
+#[derive(Clone)]
+pub enum WebMiddleware {
+    Trace,
+    Recover,
+    Cors(BTreeMap<String, String>),
+    Limit(i64),
+}
+
+pub struct WebServer {
+    host: String,
+    port: i64,
+    url: String,
+    running: Rc<RefCell<bool>>,
+    stop_tx: RefCell<Option<oneshot::Sender<()>>>,
+}
+
 pub struct TaskData {
     state: TaskState,
     handle: Option<JoinHandle<Result<Value, Diagnostic>>>,
@@ -243,6 +326,24 @@ pub enum BuiltinKind {
     StoreClear,
     WebGrab,
     WebFetch,
+    WebDen,
+    WebBurrow,
+    WebRelease,
+    WebPeek,
+    WebListen,
+    WebResponse,
+    WebText,
+    WebHtml,
+    WebJson,
+    WebBytes,
+    WebRedirect,
+    WebEmpty,
+    WebLost,
+    WebPanic,
+    WebTrace,
+    WebRecover,
+    WebCors,
+    WebLimit,
     TickNow,
 }
 
@@ -266,6 +367,26 @@ pub enum NativeMethodKind {
     ResponseJson,
     TaskDone,
     TaskCancel,
+    WebAppSniff,
+    WebAppStash,
+    WebAppReplace,
+    WebAppPatch,
+    WebAppErase,
+    WebAppAsk,
+    WebAppNod,
+    WebAppAny,
+    WebAppWear,
+    WebAppDig,
+    WebAppHoard,
+    WebAppLost,
+    WebAppRescue,
+    WebContextNext,
+    WebRequestText,
+    WebRequestJson,
+    WebRequestForm,
+    WebRequestBytes,
+    WebServerStop,
+    WebServerClosed,
 }
 
 #[derive(Clone)]
@@ -1175,7 +1296,7 @@ impl Runtime {
             Value::Function(function) => self.call_user_function(&function, args).await,
             Value::Lambda(lambda) => self.call_lambda(&lambda, args).await,
             Value::Builtin(kind) => self.call_builtin(kind, args).await,
-            Value::NativeMethod(method) => self.call_native_method(&method, args),
+            Value::NativeMethod(method) => self.call_native_method(&method, args).await,
             Value::ObjectMethod(method) => {
                 self.call_object_method(&method.object, &method.method, args)
                     .await
@@ -1513,6 +1634,62 @@ impl Runtime {
                     kind: NativeMethodKind::TaskCancel,
                 }))),
                 _ => Err(runtime_error(format!("Task has no member {name}"))),
+            },
+            Value::WebApp(_) => web_app_method(target, name),
+            Value::WebContext(context) => match name {
+                "req" => Ok(Value::WebRequest(context.borrow().req.clone())),
+                "paws" | "params" => Ok(Value::Map(Rc::new(RefCell::new(
+                    context.borrow().params.clone(),
+                )))),
+                "trail" | "query" => Ok(Value::Map(Rc::new(RefCell::new(
+                    context.borrow().query.clone(),
+                )))),
+                "pouch" | "state" => Ok(Value::Map(context.borrow().state.clone())),
+                "next" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebContextNext,
+                }))),
+                _ => Err(runtime_error(format!("Context has no member {name}"))),
+            },
+            Value::WebRequest(request) => match name {
+                "method" => Ok(Value::String(request.method.clone())),
+                "path" => Ok(Value::String(request.path.clone())),
+                "trail" | "query" => Ok(Value::Map(Rc::new(RefCell::new(request.query.clone())))),
+                "headers" => Ok(Value::Map(Rc::new(RefCell::new(request.headers.clone())))),
+                "cookies" => Ok(Value::Map(Rc::new(RefCell::new(request.cookies.clone())))),
+                "remote" => Ok(Value::String(request.remote.clone())),
+                "text" | "sniff" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebRequestText,
+                }))),
+                "json" | "crack" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebRequestJson,
+                }))),
+                "form" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebRequestForm,
+                }))),
+                "bytes" | "pelt" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebRequestBytes,
+                }))),
+                _ => Err(runtime_error(format!("Request has no member {name}"))),
+            },
+            Value::WebServer(server) => match name {
+                "host" => Ok(Value::String(server.host.clone())),
+                "port" => Ok(Value::Int(server.port)),
+                "url" | "burrow" => Ok(Value::String(server.url.clone())),
+                "running" => Ok(Value::Bool(*server.running.borrow())),
+                "stop" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebServerStop,
+                }))),
+                "closed" => Ok(Value::NativeMethod(Rc::new(NativeMethod {
+                    receiver: target.clone(),
+                    kind: NativeMethodKind::WebServerClosed,
+                }))),
+                _ => Err(runtime_error(format!("Server has no member {name}"))),
             },
             Value::UnderProxy { object, parent } => self.get_under_member(object, parent, name),
             Value::ObjectView { object, mask } => self.get_object_view_member(object, mask, name),
@@ -2281,6 +2458,70 @@ impl Runtime {
                 let runtime = self.fork_for_task();
                 Ok(self.spawn_task(async move { runtime.web_grab(&options).await }))
             }
+            BuiltinKind::WebDen | BuiltinKind::WebBurrow => {
+                require_arg_count("web.den", &args, 0)?;
+                Ok(Value::WebApp(Rc::new(RefCell::new(WebApp::new()))))
+            }
+            BuiltinKind::WebRelease => {
+                require_arg_count("web.release", &args, 2)?;
+                let app = require_web_app(&args[0], "web.release")?;
+                let options = WebServeOptions::from_value(&args[1])?;
+                let (listener, server, stop_rx, config) = bind_web_server(options).await?;
+                let running = server.running.clone();
+                let result = self
+                    .run_web_server(listener, app, running, stop_rx, config)
+                    .await;
+                *server.running.borrow_mut() = false;
+                result
+            }
+            BuiltinKind::WebPeek | BuiltinKind::WebListen => {
+                require_arg_count("web.peek", &args, 2)?;
+                let app = require_web_app(&args[0], "web.peek")?;
+                let options = WebServeOptions::from_value(&args[1])?;
+                let (listener, server, stop_rx, config) = bind_web_server(options).await?;
+                let server_value = Value::WebServer(Rc::new(server));
+                let Value::WebServer(server_ref) = server_value.clone() else {
+                    unreachable!()
+                };
+                let running = server_ref.running.clone();
+                let mut runtime = self.fork_for_task();
+                tokio::task::spawn_local(async move {
+                    if let Err(err) = runtime
+                        .run_web_server(listener, app, running.clone(), stop_rx, config)
+                        .await
+                    {
+                        runtime
+                            .trace
+                            .borrow_mut()
+                            .push(format!("web server error: {err}"));
+                    }
+                    *running.borrow_mut() = false;
+                });
+                Ok(server_value)
+            }
+            BuiltinKind::WebResponse => self.web_response(args),
+            BuiltinKind::WebText => {
+                web_text_response("web.text", args, "text/plain; charset=utf-8")
+            }
+            BuiltinKind::WebHtml => web_text_response("web.html", args, "text/html; charset=utf-8"),
+            BuiltinKind::WebJson => self.web_json_response(args),
+            BuiltinKind::WebBytes => {
+                web_text_response("web.bytes", args, "application/octet-stream")
+            }
+            BuiltinKind::WebRedirect => web_redirect_response(args),
+            BuiltinKind::WebEmpty => web_empty_response(args),
+            BuiltinKind::WebLost => web_error_response("web.lost", args, 404),
+            BuiltinKind::WebPanic => web_error_response("web.panic", args, 500),
+            BuiltinKind::WebTrace => {
+                require_arg_count("web.trace", &args, 0)?;
+                Ok(Value::WebMiddleware(Rc::new(WebMiddleware::Trace)))
+            }
+            BuiltinKind::WebRecover => {
+                require_arg_count("web.recover", &args, 0)?;
+                Ok(Value::WebMiddleware(Rc::new(WebMiddleware::Recover)))
+            }
+            BuiltinKind::WebCors => web_cors_middleware(args),
+            BuiltinKind::WebLimit => web_limit_middleware(args),
             BuiltinKind::TickNow => {
                 require_arg_count("tick.now", &args, 0)?;
                 let millis = SystemTime::now()
@@ -2292,7 +2533,8 @@ impl Runtime {
         }
     }
 
-    fn call_native_method(
+    #[async_recursion::async_recursion(?Send)]
+    async fn call_native_method(
         &mut self,
         method: &NativeMethod,
         args: Vec<Value>,
@@ -2462,6 +2704,98 @@ impl Runtime {
                 require_arg_count("Task.cancel", &args, 0)?;
                 if let Value::Task(task) = &method.receiver {
                     Ok(Value::Bool(task_cancel(task)))
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebAppSniff => add_web_route(&method.receiver, "GET", args),
+            NativeMethodKind::WebAppStash => add_web_route(&method.receiver, "POST", args),
+            NativeMethodKind::WebAppReplace => add_web_route(&method.receiver, "PUT", args),
+            NativeMethodKind::WebAppPatch => add_web_route(&method.receiver, "PATCH", args),
+            NativeMethodKind::WebAppErase => add_web_route(&method.receiver, "DELETE", args),
+            NativeMethodKind::WebAppAsk => add_web_route(&method.receiver, "OPTIONS", args),
+            NativeMethodKind::WebAppNod => add_web_route(&method.receiver, "HEAD", args),
+            NativeMethodKind::WebAppAny => add_web_any_route(&method.receiver, args),
+            NativeMethodKind::WebAppWear => add_web_middleware(&method.receiver, args),
+            NativeMethodKind::WebAppDig => mount_web_app(&method.receiver, args),
+            NativeMethodKind::WebAppHoard => {
+                add_web_static(&method.receiver, args, self.source_path.as_deref())
+            }
+            NativeMethodKind::WebAppLost => set_web_handler(&method.receiver, args, true),
+            NativeMethodKind::WebAppRescue => set_web_handler(&method.receiver, args, false),
+            NativeMethodKind::WebContextNext => {
+                require_arg_count("ctx.next", &args, 0)?;
+                Ok(Value::Null)
+            }
+            NativeMethodKind::WebRequestText => {
+                require_arg_count("Request.text", &args, 0)?;
+                if let Value::WebRequest(request) = &method.receiver {
+                    Ok(Value::String(request.body.clone()))
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebRequestJson => {
+                require_arg_count("Request.json", &args, 0)?;
+                if let Value::WebRequest(request) = &method.receiver {
+                    let json: JsonValue = serde_json::from_str(&request.body)
+                        .map_err(|err| runtime_error(format!("invalid JSON request: {err}")))?;
+                    json_to_value(&json)
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebRequestForm => {
+                require_arg_count("Request.form", &args, 0)?;
+                if let Value::WebRequest(request) = &method.receiver {
+                    Ok(Value::Map(Rc::new(RefCell::new(parse_form_body(
+                        &request.body,
+                    )?))))
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebRequestBytes => {
+                require_arg_count("Request.bytes", &args, 0)?;
+                if let Value::WebRequest(request) = &method.receiver {
+                    Ok(Value::Array(Rc::new(RefCell::new(
+                        request
+                            .body
+                            .as_bytes()
+                            .iter()
+                            .map(|byte| Value::Int(*byte as i64))
+                            .collect(),
+                    ))))
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebServerStop => {
+                require_arg_count("Server.stop", &args, 0)?;
+                if let Value::WebServer(server) = &method.receiver {
+                    let sent = server
+                        .stop_tx
+                        .borrow_mut()
+                        .take()
+                        .is_some_and(|tx| tx.send(()).is_ok());
+                    if sent {
+                        *server.running.borrow_mut() = false;
+                    }
+                    Ok(Value::Bool(sent))
+                } else {
+                    unreachable!()
+                }
+            }
+            NativeMethodKind::WebServerClosed => {
+                require_arg_count("Server.closed", &args, 0)?;
+                if let Value::WebServer(server) = &method.receiver {
+                    let running = server.running.clone();
+                    Ok(self.spawn_task(async move {
+                        while *running.borrow() {
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                        Ok(Value::Null)
+                    }))
                 } else {
                     unreachable!()
                 }
@@ -2841,6 +3175,272 @@ impl Runtime {
         })))
     }
 
+    fn web_response(&self, args: Vec<Value>) -> Result<Value, Diagnostic> {
+        require_arg_count("web.response", &args, 1)?;
+        Ok(Value::Response(Rc::new(web_response_from_options(
+            &args[0],
+        )?)))
+    }
+
+    fn web_json_response(&self, args: Vec<Value>) -> Result<Value, Diagnostic> {
+        if args.is_empty() || args.len() > 2 {
+            return Err(runtime_error("web.json expects value and optional status"));
+        }
+        let status = optional_status(&args, 1, 200, "web.json")?;
+        let body = serde_json::to_string(&plain_json_from_value(&args[0])?)
+            .map_err(|err| runtime_error(err.to_string()))?;
+        Ok(Value::Response(Rc::new(response_with_body(
+            status,
+            body,
+            &[("content-type", "application/json")],
+        ))))
+    }
+
+    async fn run_web_server(
+        &mut self,
+        listener: TcpListener,
+        app: WebAppRef,
+        running: Rc<RefCell<bool>>,
+        mut stop_rx: oneshot::Receiver<()>,
+        config: WebServeOptions,
+    ) -> Result<Value, Diagnostic> {
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                accepted = listener.accept() => {
+                    let (stream, remote) = accepted.map_err(|err| {
+                        Diagnostic::new(Category::Network, format!("web server accept failed: {err}"))
+                    })?;
+                    if !*running.borrow() {
+                        break;
+                    }
+                    if let Err(err) = self.handle_web_connection(stream, remote, app.clone(), &config).await {
+                        self.trace.borrow_mut().push(format!("web request failed: {err}"));
+                    }
+                }
+            }
+            if !*running.borrow() {
+                break;
+            }
+        }
+        *running.borrow_mut() = false;
+        Ok(Value::Null)
+    }
+
+    async fn handle_web_connection(
+        &mut self,
+        mut stream: TcpStream,
+        remote: SocketAddr,
+        app: WebAppRef,
+        config: &WebServeOptions,
+    ) -> Result<(), Diagnostic> {
+        let read = timeout(
+            Duration::from_millis(config.request_timeout_ms as u64),
+            read_web_request(&mut stream, remote, config.max_body_bytes),
+        )
+        .await
+        .map_err(|_| runtime_error("web request timed out"))?;
+        let (request, head_only) = match read {
+            Ok(request) => {
+                let head_only = request.method == "HEAD";
+                (request, head_only)
+            }
+            Err(err) => {
+                let response = response_with_body(
+                    400,
+                    err.message,
+                    &[("content-type", "text/plain; charset=utf-8")],
+                );
+                write_web_response(&mut stream, response, false).await?;
+                return Ok(());
+            }
+        };
+        let response = match self.handle_web_request(app, request.clone()).await {
+            Ok(response) => response,
+            Err(err) => response_with_body(
+                500,
+                err.message,
+                &[("content-type", "text/plain; charset=utf-8")],
+            ),
+        };
+        write_web_response(&mut stream, response, head_only).await
+    }
+
+    async fn handle_web_request(
+        &mut self,
+        app: WebAppRef,
+        request: WebRequest,
+    ) -> Result<Response, Diagnostic> {
+        let request = Rc::new(request);
+        let state = Rc::new(RefCell::new(BTreeMap::new()));
+        match self
+            .dispatch_web_app(app.clone(), request.clone(), &request.path, state.clone())
+            .await
+        {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => {
+                let not_found = app.borrow().not_found.clone();
+                if let Some(handler) = not_found {
+                    let ctx = make_web_context(request, BTreeMap::new(), state);
+                    let value = self.call_value(handler, vec![ctx]).await?;
+                    self.web_value_to_response(value, 404).await
+                } else {
+                    Ok(response_with_body(
+                        404,
+                        "not found".to_string(),
+                        &[("content-type", "text/plain; charset=utf-8")],
+                    ))
+                }
+            }
+            Err(err) => {
+                let error_handler = app.borrow().error_handler.clone();
+                if let Some(handler) = error_handler {
+                    let ctx = make_web_context(request, BTreeMap::new(), state);
+                    match self.call_value(handler, vec![ctx]).await {
+                        Ok(value) => self.web_value_to_response(value, 500).await,
+                        Err(handler_err) => Ok(response_with_body(
+                            500,
+                            handler_err.message,
+                            &[("content-type", "text/plain; charset=utf-8")],
+                        )),
+                    }
+                } else {
+                    Ok(response_with_body(
+                        500,
+                        err.message,
+                        &[("content-type", "text/plain; charset=utf-8")],
+                    ))
+                }
+            }
+        }
+    }
+
+    #[async_recursion::async_recursion(?Send)]
+    async fn dispatch_web_app(
+        &mut self,
+        app: WebAppRef,
+        request: WebRequestRef,
+        match_path: &str,
+        state: MapRef,
+    ) -> Result<Option<Response>, Diagnostic> {
+        let snapshot = app.borrow().clone();
+        let mut cors_headers = Vec::<(&'static str, String)>::new();
+        for middleware in snapshot.middleware {
+            match middleware {
+                Value::WebMiddleware(kind) => match kind.as_ref() {
+                    WebMiddleware::Trace => self
+                        .trace
+                        .borrow_mut()
+                        .push(format!("{} {}", request.method, request.path)),
+                    WebMiddleware::Recover => {}
+                    WebMiddleware::Cors(options) => {
+                        let origin = options
+                            .get("origin")
+                            .cloned()
+                            .unwrap_or_else(|| "*".to_string());
+                        cors_headers.push(("access-control-allow-origin", origin));
+                    }
+                    WebMiddleware::Limit(limit) => {
+                        if request.body.len() as i64 > *limit {
+                            return Ok(Some(response_with_body(
+                                413,
+                                "request body too large".to_string(),
+                                &[("content-type", "text/plain; charset=utf-8")],
+                            )));
+                        }
+                    }
+                },
+                handler => {
+                    let ctx = make_web_context(request.clone(), BTreeMap::new(), state.clone());
+                    let value = self.call_value(handler, vec![ctx]).await?;
+                    if !matches!(value, Value::Null) {
+                        let mut response = self.web_value_to_response(value, 200).await?;
+                        apply_dynamic_headers(&mut response, &cors_headers);
+                        return Ok(Some(response));
+                    }
+                }
+            }
+        }
+
+        for route in snapshot.routes {
+            if !route.method.matches(&request.method) {
+                continue;
+            }
+            if let Some(params) = match_web_route(&route.path, match_path)? {
+                let ctx = make_web_context(request.clone(), params, state.clone());
+                let value = self.call_value(route.handler, vec![ctx]).await?;
+                let mut response = self.web_value_to_response(value, 200).await?;
+                apply_dynamic_headers(&mut response, &cors_headers);
+                return Ok(Some(response));
+            }
+        }
+
+        for mounted in snapshot.mounts {
+            if let Some(rest) = strip_web_prefix(match_path, &mounted.prefix) {
+                let response = self
+                    .dispatch_web_app(mounted.app, request.clone(), &rest, state.clone())
+                    .await?;
+                if let Some(mut response) = response {
+                    apply_dynamic_headers(&mut response, &cors_headers);
+                    return Ok(Some(response));
+                }
+            }
+        }
+
+        for static_dir in snapshot.static_dirs {
+            if let Some(rest) = strip_web_prefix(match_path, &static_dir.prefix) {
+                if let Some(mut response) = serve_static_file(&static_dir.directory, &rest)? {
+                    apply_dynamic_headers(&mut response, &cors_headers);
+                    return Ok(Some(response));
+                }
+            }
+        }
+
+        let not_found = app.borrow().not_found.clone();
+        if let Some(handler) = not_found {
+            let ctx = make_web_context(request, BTreeMap::new(), state);
+            let value = self.call_value(handler, vec![ctx]).await?;
+            let mut response = self.web_value_to_response(value, 404).await?;
+            apply_dynamic_headers(&mut response, &cors_headers);
+            return Ok(Some(response));
+        }
+        Ok(None)
+    }
+
+    #[async_recursion::async_recursion(?Send)]
+    async fn web_value_to_response(
+        &mut self,
+        value: Value,
+        default_status: i64,
+    ) -> Result<Response, Diagnostic> {
+        let value = match value {
+            Value::Task(_) | Value::TaskGroup(_) => self.wait_value(value).await?,
+            other => other,
+        };
+        match value {
+            Value::Response(response) => Ok(response.as_ref().clone()),
+            Value::String(body) => Ok(response_with_body(
+                default_status,
+                body,
+                &[("content-type", "text/plain; charset=utf-8")],
+            )),
+            Value::Map(_) | Value::Array(_) | Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
+                let body = serde_json::to_string(&plain_json_from_value(&value)?)
+                    .map_err(|err| runtime_error(err.to_string()))?;
+                Ok(response_with_body(
+                    default_status,
+                    body,
+                    &[("content-type", "application/json")],
+                ))
+            }
+            Value::Null => Ok(response_with_body(default_status, String::new(), &[])),
+            other => Err(runtime_error(format!(
+                "web handler returned unsupported {}",
+                type_name(&other)
+            ))),
+        }
+    }
+
     fn check_type(
         &self,
         value: &Value,
@@ -2873,6 +3473,10 @@ impl Runtime {
             "Matrix" => matches!(value, Value::Matrix(_)),
             "Point" => matches!(value, Value::Point(_)),
             "Response" => matches!(value, Value::Response(_)),
+            "WebApp" | "App" | "Router" | "Burrow" => matches!(value, Value::WebApp(_)),
+            "Context" => matches!(value, Value::WebContext(_)),
+            "Request" => matches!(value, Value::WebRequest(_)),
+            "Server" => matches!(value, Value::WebServer(_)),
             "Task" => matches!(value, Value::Task(_)),
             "TaskGroup" => matches!(value, Value::TaskGroup(_)),
             name if self.dens.contains_key(name) => match &value {
@@ -3151,6 +3755,31 @@ impl Runtime {
             &[
                 ("grab", BuiltinKind::WebGrab),
                 ("fetch", BuiltinKind::WebFetch),
+                ("den", BuiltinKind::WebDen),
+                ("app", BuiltinKind::WebDen),
+                ("burrow", BuiltinKind::WebBurrow),
+                ("router", BuiltinKind::WebBurrow),
+                ("release", BuiltinKind::WebRelease),
+                ("peek", BuiltinKind::WebPeek),
+                ("listen", BuiltinKind::WebListen),
+                ("response", BuiltinKind::WebResponse),
+                ("text", BuiltinKind::WebText),
+                ("squeak", BuiltinKind::WebText),
+                ("html", BuiltinKind::WebHtml),
+                ("json", BuiltinKind::WebJson),
+                ("shiny", BuiltinKind::WebJson),
+                ("bytes", BuiltinKind::WebBytes),
+                ("pelt", BuiltinKind::WebBytes),
+                ("redirect", BuiltinKind::WebRedirect),
+                ("scurry", BuiltinKind::WebRedirect),
+                ("empty", BuiltinKind::WebEmpty),
+                ("null", BuiltinKind::WebEmpty),
+                ("lost", BuiltinKind::WebLost),
+                ("panic", BuiltinKind::WebPanic),
+                ("trace", BuiltinKind::WebTrace),
+                ("recover", BuiltinKind::WebRecover),
+                ("cors", BuiltinKind::WebCors),
+                ("limit", BuiltinKind::WebLimit),
             ],
         )
     }
@@ -3334,6 +3963,767 @@ fn task_cancel(task: &TaskRef) -> bool {
     task.state = TaskState::Canceled;
     task.result = Some(Err(runtime_error("task canceled")));
     true
+}
+
+impl WebApp {
+    fn new() -> Self {
+        Self {
+            routes: Vec::new(),
+            middleware: Vec::new(),
+            mounts: Vec::new(),
+            static_dirs: Vec::new(),
+            not_found: None,
+            error_handler: None,
+        }
+    }
+}
+
+impl WebRouteMethod {
+    fn matches(&self, method: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Method(expected) => expected == method,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WebServeOptions {
+    host: String,
+    port: i64,
+    workers: i64,
+    max_body_bytes: i64,
+    request_timeout_ms: i64,
+}
+
+impl WebServeOptions {
+    fn from_value(value: &Value) -> Result<Self, Diagnostic> {
+        let mut options = Self {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            workers: 1,
+            max_body_bytes: 1_048_576,
+            request_timeout_ms: 10_000,
+        };
+        if let Value::Map(map) = value {
+            let map = map.borrow();
+            if let Some(value) = map.get("host") {
+                let Value::String(host) = value else {
+                    return Err(runtime_error("web server host must be String"));
+                };
+                options.host = host.clone();
+            }
+            if let Some(value) = map.get("port") {
+                let Value::Int(port) = value else {
+                    return Err(runtime_error("web server port must be Int"));
+                };
+                options.port = *port;
+            }
+            if let Some(value) = map.get("workers") {
+                let Value::Int(workers) = value else {
+                    return Err(runtime_error("web server workers must be Int"));
+                };
+                options.workers = *workers;
+            }
+            if let Some(value) = map.get("max_body_bytes") {
+                let Value::Int(max_body_bytes) = value else {
+                    return Err(runtime_error("web server max_body_bytes must be Int"));
+                };
+                options.max_body_bytes = *max_body_bytes;
+            }
+            if let Some(value) = map.get("request_timeout_ms") {
+                let Value::Int(request_timeout_ms) = value else {
+                    return Err(runtime_error("web server request_timeout_ms must be Int"));
+                };
+                options.request_timeout_ms = *request_timeout_ms;
+            }
+        } else {
+            return Err(runtime_error("web server options must be Map"));
+        }
+        if options.port < 0 || options.port > u16::MAX as i64 {
+            return Err(runtime_error("web server port must be between 0 and 65535"));
+        }
+        if options.max_body_bytes < 0 {
+            return Err(runtime_error("web server max_body_bytes must be >= 0"));
+        }
+        if options.request_timeout_ms <= 0 {
+            return Err(runtime_error("web server request_timeout_ms must be > 0"));
+        }
+        Ok(options)
+    }
+}
+
+async fn bind_web_server(
+    options: WebServeOptions,
+) -> Result<
+    (
+        TcpListener,
+        WebServer,
+        oneshot::Receiver<()>,
+        WebServeOptions,
+    ),
+    Diagnostic,
+> {
+    let addr = format!("{}:{}", options.host, options.port);
+    let listener = TcpListener::bind(&addr).await.map_err(|err| {
+        Diagnostic::new(Category::Network, format!("web server bind failed: {err}"))
+    })?;
+    let local = listener.local_addr().map_err(|err| {
+        Diagnostic::new(
+            Category::Network,
+            format!("web server address failed: {err}"),
+        )
+    })?;
+    let host = if options.host == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        options.host.clone()
+    };
+    let port = local.port() as i64;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let server = WebServer {
+        host: host.clone(),
+        port,
+        url: format!("http://{host}:{port}"),
+        running: Rc::new(RefCell::new(true)),
+        stop_tx: RefCell::new(Some(stop_tx)),
+    };
+    Ok((
+        listener,
+        server,
+        stop_rx,
+        WebServeOptions { port, ..options },
+    ))
+}
+
+fn web_app_method(receiver: &Value, name: &str) -> Result<Value, Diagnostic> {
+    let kind = match name {
+        "sniff" | "get" => NativeMethodKind::WebAppSniff,
+        "stash" | "post" => NativeMethodKind::WebAppStash,
+        "replace" | "put" => NativeMethodKind::WebAppReplace,
+        "patch" => NativeMethodKind::WebAppPatch,
+        "erase" | "delete" => NativeMethodKind::WebAppErase,
+        "ask" | "options" => NativeMethodKind::WebAppAsk,
+        "nod" | "head" => NativeMethodKind::WebAppNod,
+        "any" => NativeMethodKind::WebAppAny,
+        "wear" | "use" => NativeMethodKind::WebAppWear,
+        "dig" | "mount" => NativeMethodKind::WebAppDig,
+        "hoard" | "static" => NativeMethodKind::WebAppHoard,
+        "lost" | "not_found" => NativeMethodKind::WebAppLost,
+        "rescue" | "error" => NativeMethodKind::WebAppRescue,
+        "ws" | "websocket" | "sse" => {
+            return Err(Diagnostic::new(
+                Category::NotImplemented,
+                format!("web.{name} is reserved for the web server API but is not implemented yet"),
+            ))
+        }
+        _ => return Err(runtime_error(format!("WebApp has no member {name}"))),
+    };
+    Ok(Value::NativeMethod(Rc::new(NativeMethod {
+        receiver: receiver.clone(),
+        kind,
+    })))
+}
+
+fn require_web_app(value: &Value, name: &str) -> Result<WebAppRef, Diagnostic> {
+    if let Value::WebApp(app) = value {
+        Ok(app.clone())
+    } else {
+        Err(runtime_error(format!("{name} expects web den or burrow")))
+    }
+}
+
+fn add_web_route(receiver: &Value, method: &str, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    require_arg_count("den route", &args, 2)?;
+    let app = require_web_app(receiver, "den route")?;
+    let Value::String(path) = &args[0] else {
+        return Err(runtime_error("web route path must be String"));
+    };
+    app.borrow_mut().routes.push(WebRoute {
+        method: WebRouteMethod::Method(method.to_string()),
+        path: normalize_web_path(path),
+        handler: args[1].clone(),
+    });
+    Ok(receiver.clone())
+}
+
+fn add_web_any_route(receiver: &Value, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    require_arg_count("den.any", &args, 2)?;
+    let app = require_web_app(receiver, "den.any")?;
+    let Value::String(path) = &args[0] else {
+        return Err(runtime_error("web route path must be String"));
+    };
+    app.borrow_mut().routes.push(WebRoute {
+        method: WebRouteMethod::Any,
+        path: normalize_web_path(path),
+        handler: args[1].clone(),
+    });
+    Ok(receiver.clone())
+}
+
+fn add_web_middleware(receiver: &Value, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    require_arg_count("den.wear", &args, 1)?;
+    let app = require_web_app(receiver, "den.wear")?;
+    app.borrow_mut().middleware.push(args[0].clone());
+    Ok(receiver.clone())
+}
+
+fn mount_web_app(receiver: &Value, args: Vec<Value>) -> Result<Value, Diagnostic> {
+    require_arg_count("den.dig", &args, 2)?;
+    let app = require_web_app(receiver, "den.dig")?;
+    let Value::String(prefix) = &args[0] else {
+        return Err(runtime_error("web mount prefix must be String"));
+    };
+    let mounted = require_web_app(&args[1], "den.dig")?;
+    app.borrow_mut().mounts.push(WebMount {
+        prefix: normalize_web_path(prefix),
+        app: mounted,
+    });
+    Ok(receiver.clone())
+}
+
+fn add_web_static(
+    receiver: &Value,
+    args: Vec<Value>,
+    source_path: Option<&Path>,
+) -> Result<Value, Diagnostic> {
+    require_arg_count("den.hoard", &args, 2)?;
+    let app = require_web_app(receiver, "den.hoard")?;
+    let Value::String(prefix) = &args[0] else {
+        return Err(runtime_error("web static prefix must be String"));
+    };
+    let Value::String(directory) = &args[1] else {
+        return Err(runtime_error("web static directory must be String"));
+    };
+    let directory = if Path::new(directory).is_absolute() {
+        PathBuf::from(directory)
+    } else {
+        source_path
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(directory)
+    };
+    app.borrow_mut().static_dirs.push(WebStatic {
+        prefix: normalize_web_path(prefix),
+        directory,
+    });
+    Ok(receiver.clone())
+}
+
+fn set_web_handler(
+    receiver: &Value,
+    args: Vec<Value>,
+    not_found: bool,
+) -> Result<Value, Diagnostic> {
+    require_arg_count("den handler", &args, 1)?;
+    let app = require_web_app(receiver, "den handler")?;
+    if not_found {
+        app.borrow_mut().not_found = Some(args[0].clone());
+    } else {
+        app.borrow_mut().error_handler = Some(args[0].clone());
+    }
+    Ok(receiver.clone())
+}
+
+fn normalize_web_path(path: &str) -> String {
+    if path.is_empty() || path == "/" {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.trim_end_matches('/').to_string()
+    } else {
+        format!("/{}", path.trim_end_matches('/'))
+    }
+}
+
+fn strip_web_prefix(path: &str, prefix: &str) -> Option<String> {
+    let prefix = normalize_web_path(prefix);
+    let path = normalize_web_path(path);
+    if prefix == "/" {
+        return Some(path);
+    }
+    if path == prefix {
+        return Some("/".to_string());
+    }
+    path.strip_prefix(&(prefix + "/"))
+        .map(|rest| format!("/{rest}"))
+}
+
+fn make_web_context(
+    request: WebRequestRef,
+    params: BTreeMap<String, Value>,
+    state: MapRef,
+) -> Value {
+    Value::WebContext(Rc::new(RefCell::new(WebContext {
+        query: request.query.clone(),
+        req: request,
+        params,
+        state,
+    })))
+}
+
+fn match_web_route(
+    pattern: &str,
+    path: &str,
+) -> Result<Option<BTreeMap<String, Value>>, Diagnostic> {
+    let pattern = normalize_web_path(pattern);
+    let path = normalize_web_path(path);
+    if pattern == "/" && path == "/" {
+        return Ok(Some(BTreeMap::new()));
+    }
+    let pattern_parts = split_web_path(&pattern);
+    let path_parts = split_web_path(&path);
+    let mut params = BTreeMap::new();
+    let mut i = 0;
+    while i < pattern_parts.len() {
+        let pattern_part = pattern_parts[i];
+        if let Some(name) = pattern_part.strip_prefix('*') {
+            let rest = path_parts[i..].join("/");
+            params.insert(name.to_string(), Value::String(percent_decode(&rest)?));
+            return Ok(Some(params));
+        }
+        let Some(path_part) = path_parts.get(i) else {
+            return Ok(None);
+        };
+        if let Some(name) = pattern_part.strip_prefix(':') {
+            params.insert(name.to_string(), Value::String(percent_decode(path_part)?));
+        } else if pattern_part != *path_part {
+            return Ok(None);
+        }
+        i += 1;
+    }
+    if i == path_parts.len() {
+        Ok(Some(params))
+    } else {
+        Ok(None)
+    }
+}
+
+fn split_web_path(path: &str) -> Vec<&str> {
+    path.trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+async fn read_web_request(
+    stream: &mut TcpStream,
+    remote: SocketAddr,
+    max_body_bytes: i64,
+) -> Result<WebRequest, Diagnostic> {
+    let mut data = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|err| runtime_error(format!("request read failed: {err}")))?;
+        if read == 0 {
+            return Err(runtime_error("empty HTTP request"));
+        }
+        data.extend_from_slice(&chunk[..read]);
+        if let Some(pos) = find_header_end(&data) {
+            break pos;
+        }
+        if data.len() > 64 * 1024 {
+            return Err(runtime_error("HTTP request headers too large"));
+        }
+    };
+
+    let header_text = String::from_utf8(data[..header_end].to_vec())
+        .map_err(|err| runtime_error(format!("invalid HTTP headers: {err}")))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| runtime_error("HTTP request line missing"))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| runtime_error("HTTP method missing"))?
+        .to_uppercase();
+    let target = request_parts
+        .next()
+        .ok_or_else(|| runtime_error("HTTP path missing"))?;
+    let (path, query) = parse_request_target(target)?;
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(runtime_error("invalid HTTP header"));
+        };
+        headers.insert(
+            name.trim().to_ascii_lowercase(),
+            Value::String(value.trim().to_string()),
+        );
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| match value {
+            Value::String(value) => value.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(0);
+    if content_length as i64 > max_body_bytes {
+        return Err(runtime_error("request body too large"));
+    }
+    let mut body_bytes = data[header_end + 4..].to_vec();
+    while body_bytes.len() < content_length {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|err| runtime_error(format!("request body read failed: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        body_bytes.extend_from_slice(&chunk[..read]);
+        if body_bytes.len() as i64 > max_body_bytes {
+            return Err(runtime_error("request body too large"));
+        }
+    }
+    body_bytes.truncate(content_length);
+    let body = String::from_utf8(body_bytes)
+        .map_err(|err| runtime_error(format!("request body is not UTF-8: {err}")))?;
+    let cookies = parse_cookie_header(&headers);
+    Ok(WebRequest {
+        method,
+        path,
+        query,
+        headers,
+        cookies,
+        body,
+        remote: remote.to_string(),
+    })
+}
+
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_request_target(target: &str) -> Result<(String, BTreeMap<String, Value>), Diagnostic> {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let path = normalize_web_path(&percent_decode(path)?);
+    Ok((path, parse_form_body(query)?))
+}
+
+fn parse_cookie_header(headers: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    let mut cookies = BTreeMap::new();
+    let Some(Value::String(header)) = headers.get("cookie") else {
+        return cookies;
+    };
+    for part in header.split(';') {
+        if let Some((name, value)) = part.trim().split_once('=') {
+            cookies.insert(
+                name.trim().to_string(),
+                Value::String(value.trim().to_string()),
+            );
+        }
+    }
+    cookies
+}
+
+fn parse_form_body(text: &str) -> Result<BTreeMap<String, Value>, Diagnostic> {
+    let mut result = BTreeMap::new();
+    if text.is_empty() {
+        return Ok(result);
+    }
+    for pair in text.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        result.insert(percent_decode(key)?, Value::String(percent_decode(value)?));
+    }
+    Ok(result)
+}
+
+async fn write_web_response(
+    stream: &mut TcpStream,
+    response: Response,
+    head_only: bool,
+) -> Result<(), Diagnostic> {
+    let status = response.status;
+    let reason = http_reason(status);
+    let mut headers = response.headers.clone();
+    headers
+        .entry("content-length".to_string())
+        .or_insert_with(|| Value::String(response.body.len().to_string()));
+    headers
+        .entry("connection".to_string())
+        .or_insert_with(|| Value::String("close".to_string()));
+    let mut text = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (name, value) in headers {
+        text.push_str(&name);
+        text.push_str(": ");
+        text.push_str(&format_value(&value));
+        text.push_str("\r\n");
+    }
+    text.push_str("\r\n");
+    stream
+        .write_all(text.as_bytes())
+        .await
+        .map_err(|err| runtime_error(format!("response write failed: {err}")))?;
+    if !head_only {
+        stream
+            .write_all(response.body.as_bytes())
+            .await
+            .map_err(|err| runtime_error(format!("response body write failed: {err}")))?;
+    }
+    Ok(())
+}
+
+fn http_reason(status: i64) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
+}
+
+fn response_with_body(status: i64, body: String, headers: &[(&str, &str)]) -> Response {
+    let mut header_map = BTreeMap::new();
+    for (name, value) in headers {
+        header_map.insert((*name).to_string(), Value::String((*value).to_string()));
+    }
+    Response {
+        status,
+        headers: header_map,
+        body,
+        url: String::new(),
+        ok: (200..400).contains(&status),
+    }
+}
+
+fn optional_status(
+    args: &[Value],
+    index: usize,
+    default_status: i64,
+    name: &str,
+) -> Result<i64, Diagnostic> {
+    match args.get(index) {
+        Some(Value::Int(status)) => Ok(*status),
+        Some(_) => Err(runtime_error(format!("{name} status must be Int"))),
+        None => Ok(default_status),
+    }
+}
+
+fn web_text_response(
+    name: &str,
+    args: Vec<Value>,
+    content_type: &str,
+) -> Result<Value, Diagnostic> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(runtime_error(format!(
+            "{name} expects body and optional status"
+        )));
+    }
+    let body = match &args[0] {
+        Value::String(body) => body.clone(),
+        Value::Array(values) if content_type == "application/octet-stream" => values
+            .borrow()
+            .iter()
+            .map(|value| match value {
+                Value::Int(byte) if (0..=255).contains(byte) => Ok(*byte as u8 as char),
+                _ => Err(runtime_error(
+                    "web.bytes expects Array<Int 0..255> or String",
+                )),
+            })
+            .collect::<Result<String, _>>()?,
+        value => format_value(value),
+    };
+    let status = optional_status(&args, 1, 200, name)?;
+    Ok(Value::Response(Rc::new(response_with_body(
+        status,
+        body,
+        &[("content-type", content_type)],
+    ))))
+}
+
+fn web_redirect_response(args: Vec<Value>) -> Result<Value, Diagnostic> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(runtime_error(
+            "web.redirect expects url and optional status",
+        ));
+    }
+    let Value::String(url) = &args[0] else {
+        return Err(runtime_error("web.redirect url must be String"));
+    };
+    let status = optional_status(&args, 1, 302, "web.redirect")?;
+    let mut response = response_with_body(status, String::new(), &[]);
+    response
+        .headers
+        .insert("location".to_string(), Value::String(url.clone()));
+    Ok(Value::Response(Rc::new(response)))
+}
+
+fn web_empty_response(args: Vec<Value>) -> Result<Value, Diagnostic> {
+    if args.len() > 1 {
+        return Err(runtime_error("web.empty expects optional status"));
+    }
+    let status = optional_status(&args, 0, 204, "web.empty")?;
+    Ok(Value::Response(Rc::new(response_with_body(
+        status,
+        String::new(),
+        &[],
+    ))))
+}
+
+fn web_error_response(name: &str, args: Vec<Value>, status: i64) -> Result<Value, Diagnostic> {
+    if args.len() > 1 {
+        return Err(runtime_error(format!("{name} expects optional message")));
+    }
+    let body = match args.first() {
+        Some(Value::String(body)) => body.clone(),
+        Some(value) => format_value(value),
+        None if status == 404 => "not found".to_string(),
+        None => "internal server error".to_string(),
+    };
+    Ok(Value::Response(Rc::new(response_with_body(
+        status,
+        body,
+        &[("content-type", "text/plain; charset=utf-8")],
+    ))))
+}
+
+fn web_response_from_options(value: &Value) -> Result<Response, Diagnostic> {
+    let Value::Map(map) = value else {
+        return Err(runtime_error("web.response expects Map options"));
+    };
+    let map = map.borrow();
+    let status = match map.get("status") {
+        Some(Value::Int(status)) => *status,
+        Some(_) => return Err(runtime_error("web.response status must be Int")),
+        None => 200,
+    };
+    let body = match map.get("body") {
+        Some(Value::String(body)) => body.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => format_value(value),
+    };
+    let headers = match map.get("headers") {
+        Some(Value::Map(headers)) => headers.borrow().clone(),
+        Some(Value::Null) | None => BTreeMap::new(),
+        Some(_) => return Err(runtime_error("web.response headers must be Map")),
+    };
+    Ok(Response {
+        status,
+        headers,
+        body,
+        url: String::new(),
+        ok: (200..400).contains(&status),
+    })
+}
+
+fn web_cors_middleware(args: Vec<Value>) -> Result<Value, Diagnostic> {
+    if args.len() > 1 {
+        return Err(runtime_error("web.cors expects optional Map options"));
+    }
+    let mut options = BTreeMap::new();
+    if let Some(value) = args.first() {
+        let Value::Map(map) = value else {
+            return Err(runtime_error("web.cors options must be Map"));
+        };
+        for (key, value) in map.borrow().iter() {
+            let Value::String(value) = value else {
+                return Err(runtime_error("web.cors option values must be String"));
+            };
+            options.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::WebMiddleware(Rc::new(WebMiddleware::Cors(options))))
+}
+
+fn web_limit_middleware(args: Vec<Value>) -> Result<Value, Diagnostic> {
+    require_arg_count("web.limit", &args, 1)?;
+    let Value::Int(limit) = args[0] else {
+        return Err(runtime_error("web.limit expects Int bytes"));
+    };
+    Ok(Value::WebMiddleware(Rc::new(WebMiddleware::Limit(limit))))
+}
+
+fn apply_dynamic_headers(response: &mut Response, headers: &[(&'static str, String)]) {
+    for (name, value) in headers {
+        response
+            .headers
+            .entry((*name).to_string())
+            .or_insert_with(|| Value::String(value.clone()));
+    }
+}
+
+fn plain_json_from_value(value: &Value) -> Result<JsonValue, Diagnostic> {
+    match value {
+        Value::Null => Ok(JsonValue::Null),
+        Value::Bool(value) => Ok(JsonValue::Bool(*value)),
+        Value::Int(value) => Ok(JsonValue::Number((*value).into())),
+        Value::Float(value) => serde_json::Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .ok_or_else(|| runtime_error("cannot encode non-finite Float as JSON")),
+        Value::String(value) => Ok(JsonValue::String(value.clone())),
+        Value::Array(values) => Ok(JsonValue::Array(
+            values
+                .borrow()
+                .iter()
+                .map(plain_json_from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Map(values) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in values.borrow().iter() {
+                object.insert(key.clone(), plain_json_from_value(value)?);
+            }
+            Ok(JsonValue::Object(object))
+        }
+        Value::Point(point) => Ok(json!({ "x": point.x, "y": point.y })),
+        other => Err(runtime_error(format!(
+            "cannot encode {} as JSON",
+            type_name(other)
+        ))),
+    }
+}
+
+fn serve_static_file(directory: &Path, rest: &str) -> Result<Option<Response>, Diagnostic> {
+    let relative = rest.trim_start_matches('/');
+    if relative.is_empty() {
+        return Ok(None);
+    }
+    let base = match directory.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let candidate = base.join(relative);
+    let path = match candidate.canonicalize() {
+        Ok(path) if path.starts_with(&base) && path.is_file() => path,
+        _ => return Ok(None),
+    };
+    let body = fs::read_to_string(&path).map_err(io_error)?;
+    Ok(Some(response_with_body(
+        200,
+        body,
+        &[("content-type", mime_for_path(&path))],
+    )))
+}
+
+fn mime_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 fn find_env(env: &EnvRef, name: &str) -> Option<EnvRef> {
@@ -4130,6 +5520,11 @@ pub fn format_value(value: &Value) -> String {
         }
         Value::UnderProxy { .. } => "<under>".to_string(),
         Value::Response(response) => format!("<Response {} {}>", response.status, response.url),
+        Value::WebApp(_) => "<web den>".to_string(),
+        Value::WebContext(_) => "<web context>".to_string(),
+        Value::WebMiddleware(_) => "<web middleware>".to_string(),
+        Value::WebRequest(request) => format!("<Request {} {}>", request.method, request.path),
+        Value::WebServer(server) => format!("<Server {}>", server.url),
         Value::Task(_) => "<task>".to_string(),
         Value::TaskGroup(values) => format!("<task-group {}>", values.len()),
         Value::Store(db) => format!("<store {}>", db.borrow().path.display()),
@@ -4159,6 +5554,11 @@ pub fn type_name(value: &Value) -> &'static str {
         Value::ObjectMethod(_) => "Function",
         Value::UnderProxy { .. } => "Under",
         Value::Response(_) => "Response",
+        Value::WebApp(_) => "WebApp",
+        Value::WebContext(_) => "Context",
+        Value::WebMiddleware(_) => "Middleware",
+        Value::WebRequest(_) => "Request",
+        Value::WebServer(_) => "Server",
         Value::Task(_) => "Task",
         Value::TaskGroup(_) => "TaskGroup",
         Value::Store(_) => "Store",

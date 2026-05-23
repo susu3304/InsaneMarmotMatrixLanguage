@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-pub const VERSION: &str = "0.1.0";
-pub const VERSION_TEXT: &str = "insane marmot matrix native 0.1.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION_TEXT: &str = concat!("insane marmot matrix native ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

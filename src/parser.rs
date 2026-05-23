@@ -760,6 +760,8 @@ impl Parser {
         for (keyword, name) in [
             (Keyword::SelfValue, "self"),
             (Keyword::Under, "under"),
+            (Keyword::Den, "den"),
+            (Keyword::Burrow, "burrow"),
             (Keyword::Web, "web"),
             (Keyword::Tick, "tick"),
             (Keyword::Nap, "nap"),

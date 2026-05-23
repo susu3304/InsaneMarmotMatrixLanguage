@@ -163,8 +163,11 @@ probe "add" {
 
 `store` は外部DBなしの標準永続化機能として、`den` オブジェクトを `.immstore` ファイルへ保存・復元する `open`、`save`、`load`、`all`、`find`、`get`、`delete`、`count`、`clear` を提供する。
 
-`web` は同期 HTTP の `grab` と async HTTP の `fetch` を提供する。
-戻り値 `Response` は `status`、`headers`、`body`、`url`、`ok`、`text()`、`json()` を持つ。
+`web` は同期 HTTP の `grab`、async HTTP の `fetch`、HTTP サーバー用の
+`den` / `burrow` / `release` / `peek` を提供する。戻り値 `Response` は
+`status`、`headers`、`body`、`url`、`ok`、`text()`、`json()` を持つ。
+サーバー側では `den.sniff`、`den.stash`、`den.dig`、`ctx.paws`、
+`ctx.trail`、`req.crack()`、`web.shiny()` などの IMM 語彙 API を主に使う。
 
 `tick` は `now()` で UNIX ミリ秒を返す。`nap(ms)` は howl タスクとしてスリープする。
 

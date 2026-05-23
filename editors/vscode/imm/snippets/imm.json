@@ -91,5 +91,41 @@
       "]"
     ],
     "description": "Create a matrix literal."
+  },
+  "web den server": {
+    "prefix": "web-den",
+    "body": [
+      "use web",
+      "",
+      "dig home(ctx) {",
+      "    return web.html(\"<h1>${1:Hello insane marmot matrix}</h1>\")",
+      "}",
+      "",
+      "marmot main {",
+      "    let den = web.den()",
+      "",
+      "    den.wear(web.trace())",
+      "    den.sniff(\"/\", home)",
+      "",
+      "    web.release(den, {",
+      "        \"host\": \"127.0.0.1\",",
+      "        \"port\": ${2:8080}",
+      "    })",
+      "}"
+    ],
+    "description": "Create an IMM web.den HTTP server."
+  },
+  "web route": {
+    "prefix": "route-sniff",
+    "body": [
+      "dig ${1:handler}(ctx) {",
+      "    return web.shiny({",
+      "        \"ok\": true",
+      "    })",
+      "}",
+      "",
+      "${2:den}.sniff(\"${3:/path}\", ${1:handler})"
+    ],
+    "description": "Create a web route handler and den.sniff registration."
   }
 }

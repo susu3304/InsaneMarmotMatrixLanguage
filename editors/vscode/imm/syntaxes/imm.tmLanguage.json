@@ -154,7 +154,7 @@
       "patterns": [
         {
           "name": "support.type.imm",
-          "match": "\\b(?:Int|Float|Bool|String|Array|Matrix|Point|Null|Void|Task|TaskGroup|Response|Map)\\b"
+          "match": "\\b(?:Int|Float|Bool|String|Array|Matrix|Point|Null|Void|Task|TaskGroup|Response|WebApp|App|Router|Burrow|Context|Request|Server|Middleware|Map)\\b"
         }
       ]
     },
@@ -194,7 +194,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.imm",
-          "match": "\\b(?:squeak|sniff|panic|trace|wait|scatter|nest|nap|expect|map|filter|reduce|len|type|str|int|float|bool|width|height|in_bounds|points|neighbors4|neighbors8|find|find_all|bfs|astar|direction|step|parse_field|safe_moves|random_move|open|save|load|all|get|delete|count|clear|grab|fetch|now|json|text)\\b"
+          "match": "\\b(?:squeak|sniff|panic|trace|wait|scatter|nest|nap|expect|map|filter|reduce|len|type|str|int|float|bool|width|height|in_bounds|points|neighbors4|neighbors8|find|find_all|bfs|astar|direction|step|parse_field|safe_moves|random_move|open|save|load|all|get|delete|count|clear|grab|fetch|now|den|app|burrow|router|release|peek|listen|response|json|text|html|shiny|bytes|pelt|redirect|scurry|empty|lost|recover|cors|limit|stash|replace|patch|erase|ask|nod|any|wear|dig|hoard|rescue|params|query|paws|trail|pouch|crack|form)\\b"
         },
         {
           "name": "support.module.imm",

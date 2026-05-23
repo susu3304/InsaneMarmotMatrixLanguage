@@ -43,7 +43,7 @@ Status legend:
 | `math` library | done | Required math functions are available. |
 | `path` library | done | Basic BFS and A* are available. |
 | `store` library | partial | Built-in JSON-backed object persistence supports open/save/load/all/find/get/delete/count/clear for `den` objects. Transactions, indexes, and concurrent writers are planned. |
-| `web` library | done | Rust supports async `web.grab` / `web.fetch`, `data:` URLs, HTTP method/header/body/timeout options, `Response` fields/methods, JSON/text helpers, and HTTP error statuses as values. |
+| `web` library | partial | Rust supports async `web.grab` / `web.fetch`, `data:` URLs, HTTP method/header/body/timeout options, `Response` fields/methods, JSON/text helpers, HTTP error statuses as values, and the IMM-style HTTP server API `web.den` / `web.burrow` / `web.release` / `web.peek` with routing, params, query, middleware, static files, 404/error handlers, and local law coverage. TLS, WebSocket, SSE, and true worker parallelism are planned. |
 | `howl` tasks | done | `howl marmot main`, `howl dig`, `wait`, `scatter`, `nest`, and `nap` run through the tokio-backed task runtime. |
 | `tick` library | done | `tick.now()` returns UNIX milliseconds. |
 | `probe` / `expect` | done | Probe blocks parse, check, and run through `imm probe`; failed expects report the file and probe name. |

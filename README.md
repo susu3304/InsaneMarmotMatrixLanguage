@@ -23,14 +23,14 @@ Hello, insane marmot matrix!
 
 ## インストール
 
-Windows では winget 公開用の portable zip とマニフェストを用意しています。winget-pkgs に取り込まれた後は次で入れられます。
+Windows では winget 公開用の portable zip とマニフェストを用意しています。通常のリリース手順は `docs/release.md`、winget-pkgs への提出手順は `docs/winget.md` にまとめています。winget-pkgs に取り込まれた後は次で入れられます。
 
 ```powershell
 winget install --id susu3304.InsaneMarmotMatrixLanguage
 imm --version
 ```
 
-リリース作成、ローカル検証、winget-pkgs への提出手順は `docs/winget.md` を参照してください。
+GitHub Release は `v*` タグを push すると作成されます。
 
 ## 実装済み
 
@@ -55,6 +55,7 @@ imm --version
 - `use math` / `use path`
 - 同じディレクトリの `foo.imm` を `use foo` で読み込む簡易モジュール
 - `use web` による `web.grab` / `web.fetch`
+- `web.den` / `web.burrow` / `web.release` / `web.peek` によるHTTPサーバー
 - `howl` / `wait` / `scatter` / `nest`
 - `nap` / `tick.now()`
 - `probe` / `expect` / `imm law`
@@ -112,7 +113,7 @@ cargo run -- --version
 
 `store` ライブラリには、外部DBなしで `den` オブジェクトを永続化する `open`、`save`、`load`、`all`、`find`、`get`、`delete`、`count`、`clear` が入っています。保存ファイルの拡張子は慣例として `.immstore` です。
 
-`web` ライブラリには async HTTP の `grab` と howl 向けの `fetch` が入っています。`howl` タスク、`probe`/`law`、`trace`、`pack` の詳細は `docs/web-spec.md`、`docs/howl-spec.md`、`docs/pack-spec.md` を参照してください。
+`web` ライブラリには async HTTP の `grab`、howl 向けの `fetch`、IMM語彙のHTTPサーバーAPI `den` / `burrow` / `release` / `peek` が入っています。`howl` タスク、`probe`/`law`、`trace`、`pack` の詳細は `docs/web-spec.md`、`docs/howl-spec.md`、`docs/pack-spec.md` を参照してください。
 
 ## 開発
 

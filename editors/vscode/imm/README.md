@@ -5,9 +5,9 @@ VS Code language support for IMM (`.imm`) files.
 ## Features
 
 - `.imm` language registration.
-- Syntax highlighting for IMM keywords, types, strings, comments, numbers, declarations, and built-in functions.
+- Syntax highlighting for IMM keywords, types, strings, comments, numbers, declarations, built-in functions, and the IMM-style web server API.
 - Comment, bracket, folding, and indentation rules.
-- Snippets for `marmot main`, `howl marmot main`, `dig`, `probe`, `den`, `mask`, loops, and matrices.
+- Snippets for `marmot main`, `howl marmot main`, `dig`, `probe`, `den`, `mask`, loops, matrices, and `web.den` servers.
 - Commands:
   - `IMM: Check File`
   - `IMM: Run File`
