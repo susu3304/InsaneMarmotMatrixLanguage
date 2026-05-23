@@ -21,6 +21,17 @@ cargo run -- pack examples/hello.imm --crate dist/hello-native --pelt native
 Hello, insane marmot matrix!
 ```
 
+## インストール
+
+Windows では winget 公開用の portable zip とマニフェストを用意しています。winget-pkgs に取り込まれた後は次で入れられます。
+
+```powershell
+winget install --id susu3304.InsaneMarmotMatrixLanguage
+imm --version
+```
+
+リリース作成、ローカル検証、winget-pkgs への提出手順は `docs/winget.md` を参照してください。
+
 ## 実装済み
 
 - `.imm` ファイル読み込み
