@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rand::Rng;
 use serde_json::{json, Value as JsonValue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1241,11 +1242,12 @@ impl Runtime {
             }
             Expr::InsaneChoose(expr) => {
                 let values = self.evaluate(expr).await?;
-                let mut values = self.iter_values(&values)?;
+                let values = self.iter_values(&values)?;
                 if values.is_empty() {
                     Ok(Value::Null)
                 } else {
-                    Ok(values.remove(0))
+                    let index = rand::rng().random_range(0..values.len());
+                    Ok(values[index].clone())
                 }
             }
             Expr::Wait(expr) => {

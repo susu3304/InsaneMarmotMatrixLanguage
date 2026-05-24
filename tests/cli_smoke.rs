@@ -171,3 +171,46 @@ howl marmot main {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n");
 }
+
+#[test]
+fn insane_choose_randomizes_iterable_selection() {
+    let dir = std::env::temp_dir().join(format!("imm-native-choose-test-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let file = dir.join("choose.imm");
+    fs::write(
+        &file,
+        r#"marmot main {
+    let i = 0
+    while i < 200 {
+        squeak insane choose [0, 1, 2, 3]
+        i = i + 1
+    }
+    squeak insane choose []
+}
+"#,
+    )
+    .expect("write IMM choose program");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_imm-native"))
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("run imm-native choose program");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 201);
+    assert_eq!(lines.last(), Some(&"null"));
+    assert!(lines[..200]
+        .iter()
+        .all(|line| ["0", "1", "2", "3"].contains(line)));
+    assert!(
+        lines[..200].iter().any(|line| *line != "0"),
+        "insane choose should not always select the first item"
+    );
+}

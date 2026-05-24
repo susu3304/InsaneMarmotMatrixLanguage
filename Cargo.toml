@@ -1,6 +1,6 @@
 [package]
 name = "imm-native"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,7 @@ thiserror = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 async-recursion = "1"
 tokio = { version = "1", features = ["rt", "time", "macros", "net", "io-util", "sync"] }
+rand = "0.9"
 
 [lib]
 name = "imm_native"

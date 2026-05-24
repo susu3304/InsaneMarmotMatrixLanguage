@@ -2,7 +2,7 @@
   "name": "imm-vscode",
   "displayName": "insane marmot matrix",
   "description": "VS Code language support for IMM (.imm) files.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "imm",
   "license": "UNLICENSED",
   "private": true,
